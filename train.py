@@ -97,7 +97,7 @@ def compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions,
         return torch.tensor(0.0, device=device, dtype=predicted_embeddings.dtype)
 
 def train_step(
-    chunk_encoder, context_encoder, target_chunk_encoder, target_encoder, predictor, batch, optimizers):
+    chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor, batch, optimizers, ema_decay):
     tokens = batch['tokens']
     chunk_mask = batch['chunk_mask']
     target_positions = batch['target_positions']
@@ -108,7 +108,7 @@ def train_step(
         # I-JEPA style: Extract ONLY visible chunks for context encoder
         visible_chunks, visible_positions = extract_visible_chunks(chunk_embeddings, chunk_mask)
         # Context encoder processes ONLY visible chunks with their positions
-        context_embeddings = context_encoder(visible_chunks, visible_positions)
+        context_embeddings = encoder(visible_chunks, visible_positions)
         # Target path uses EMA versions (no gradients)
         with torch.no_grad():
             # Use target (EMA) chunk encoder for target path
@@ -127,15 +127,15 @@ def train_step(
     with torch.no_grad():
         chunk_model = get_module(chunk_encoder)
         for param_q, param_k in zip(chunk_model.parameters(), target_chunk_encoder.parameters()):
-            param_k.data.mul_(args.ema_decay).add_(param_q.data, alpha=1 - args.ema_decay)
+            param_k.data.mul_(ema_decay).add_(param_q.data, alpha=1 - ema_decay)
         context_model = get_module(encoder)
         for param_q, param_k in zip(context_model.parameters(), target_encoder.parameters()):
-            param_k.data.mul_(args.ema_decay).add_(param_q.data, alpha=1 - args.ema_decay)
+            param_k.data.mul_(ema_decay).add_(param_q.data, alpha=1 - ema_decay)
     return loss.item()
 
-def validate(chunk_encoder, context_encoder, target_chunk_encoder, target_encoder, predictor, val_loader):
+def validate(chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor, val_loader):
     chunk_encoder.eval()
-    context_encoder.eval()
+    encoder.eval()
     target_chunk_encoder.eval()
     target_encoder.eval()
     predictor.eval()
@@ -149,7 +149,7 @@ def validate(chunk_encoder, context_encoder, target_chunk_encoder, target_encode
             # I-JEPA style: Extract ONLY visible chunks for context encoder
             visible_chunks, visible_positions = extract_visible_chunks(chunk_embeddings, chunk_mask)
             # Context encoder processes ONLY visible chunks with their positions
-            context_embeddings = context_encoder(visible_chunks, visible_positions)
+            context_embeddings = encoder(visible_chunks, visible_positions)
             # Target path uses EMA versions for validation too
             target_chunk_embeddings = target_chunk_encoder(batch['tokens'])
             all_positions = torch.arange(target_chunk_embeddings.shape[1], device=target_chunk_embeddings.device)
@@ -162,7 +162,7 @@ def validate(chunk_encoder, context_encoder, target_chunk_encoder, target_encode
             )
             val_losses.append(loss.item())
     chunk_encoder.train()
-    context_encoder.train()
+    encoder.train()
     target_chunk_encoder.train()
     target_encoder.train()
     predictor.train()
@@ -324,7 +324,8 @@ def main():
                 for group_idx, param_group in enumerate(optimizer.param_groups):
                     param_group['lr'] = initial_lrs[opt_idx][group_idx] * lr_scale
 
-        loss = train_step(chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor, batch, optimizers)
+        loss = train_step(
+            chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor, batch, optimizers, args.ema_decay)
         batch_time = time.perf_counter() - batch_start_time
 
         # Update learning rate schedulers (after warmup)
