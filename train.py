@@ -33,6 +33,10 @@ def cleanup_distributed():
     if dist.is_initialized():
         dist.destroy_process_group()
 
+def get_module(model):
+    """Get the underlying module from DDP wrapper if needed."""
+    return model.module if hasattr(model, 'module') else model
+
 def extract_visible_chunks(chunk_embeddings, chunk_mask):
     """
     Extract only visible (non-masked) chunks from chunk embeddings and their positions.
@@ -93,7 +97,7 @@ def compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions,
         return torch.tensor(0.0, device=device, dtype=predicted_embeddings.dtype)
 
 def train_step(
-    chunk_encoder, context_encoder, target_encoder, predictor, batch, optimizers):
+    chunk_encoder, context_encoder, target_chunk_encoder, target_encoder, predictor, batch, optimizers):
     tokens = batch['tokens']
     chunk_mask = batch['chunk_mask']
     target_positions = batch['target_positions']
@@ -105,12 +109,14 @@ def train_step(
         visible_chunks, visible_positions = extract_visible_chunks(chunk_embeddings, chunk_mask)
         # Context encoder processes ONLY visible chunks with their positions
         context_embeddings = context_encoder(visible_chunks, visible_positions)
-        # Target path processes ALL chunks (no masking, no gradients)
+        # Target path uses EMA versions (no gradients)
         with torch.no_grad():
+            # Use target (EMA) chunk encoder for target path
+            target_chunk_embeddings = target_chunk_encoder(tokens)
             # Create positions for all chunks (0, 1, 2, ..., n_chunks-1)
-            all_positions = torch.arange(chunk_embeddings.shape[1], device=chunk_embeddings.device)
-            all_positions = all_positions.unsqueeze(0).expand(chunk_embeddings.shape[0], -1)
-            target_embeddings = target_encoder(chunk_embeddings, all_positions)
+            all_positions = torch.arange(target_chunk_embeddings.shape[1], device=target_chunk_embeddings.device)
+            all_positions = all_positions.unsqueeze(0).expand(target_chunk_embeddings.shape[0], -1)
+            target_embeddings = target_encoder(target_chunk_embeddings, all_positions)
         # Predict masked chunks using context from visible chunks only
         predicted_embeddings = predictor(context_embeddings, target_positions, visible_positions)
         loss = compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions, chunk_mask)
@@ -118,11 +124,19 @@ def train_step(
     for optimizer in optimizers:
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
+    with torch.no_grad():
+        chunk_model = get_module(chunk_encoder)
+        for param_q, param_k in zip(chunk_model.parameters(), target_chunk_encoder.parameters()):
+            param_k.data.mul_(args.ema_decay).add_(param_q.data, alpha=1 - args.ema_decay)
+        context_model = get_module(encoder)
+        for param_q, param_k in zip(context_model.parameters(), target_encoder.parameters()):
+            param_k.data.mul_(args.ema_decay).add_(param_q.data, alpha=1 - args.ema_decay)
     return loss.item()
 
-def validate(chunk_encoder, context_encoder, target_encoder, predictor, val_loader):
+def validate(chunk_encoder, context_encoder, target_chunk_encoder, target_encoder, predictor, val_loader):
     chunk_encoder.eval()
     context_encoder.eval()
+    target_chunk_encoder.eval()
     target_encoder.eval()
     predictor.eval()
     val_losses = []
@@ -136,10 +150,11 @@ def validate(chunk_encoder, context_encoder, target_encoder, predictor, val_load
             visible_chunks, visible_positions = extract_visible_chunks(chunk_embeddings, chunk_mask)
             # Context encoder processes ONLY visible chunks with their positions
             context_embeddings = context_encoder(visible_chunks, visible_positions)
-            # Target encoder processes ALL chunks with their positions
-            all_positions = torch.arange(chunk_embeddings.shape[1], device=chunk_embeddings.device)
-            all_positions = all_positions.unsqueeze(0).expand(chunk_embeddings.shape[0], -1)
-            target_embeddings = target_encoder(chunk_embeddings, all_positions)
+            # Target path uses EMA versions for validation too
+            target_chunk_embeddings = target_chunk_encoder(batch['tokens'])
+            all_positions = torch.arange(target_chunk_embeddings.shape[1], device=target_chunk_embeddings.device)
+            all_positions = all_positions.unsqueeze(0).expand(target_chunk_embeddings.shape[0], -1)
+            target_embeddings = target_encoder(target_chunk_embeddings, all_positions)
             predicted_embeddings = predictor(context_embeddings, batch['target_positions'], visible_positions)
             loss = compute_jepa_loss(
                 predicted_embeddings, target_embeddings,
@@ -148,6 +163,7 @@ def validate(chunk_encoder, context_encoder, target_encoder, predictor, val_load
             val_losses.append(loss.item())
     chunk_encoder.train()
     context_encoder.train()
+    target_chunk_encoder.train()
     target_encoder.train()
     predictor.train()
     return sum(val_losses) / len(val_losses) if val_losses else 0.0
@@ -231,12 +247,14 @@ def main():
 
     chunk_encoder = ChunkEncoder(chunk_enc_config).to(device)
     encoder = Encoder(enc_config).to(device)
-    target_encoder = copy.deepcopy(encoder)  # Start with same weights
+    target_chunk_encoder = copy.deepcopy(chunk_encoder)  # EMA version of chunk encoder
+    target_encoder = copy.deepcopy(encoder)  # EMA version of context encoder
     predictor = Predictor(pred_config).to(device)
 
     if args.compile:
         chunk_encoder = torch.compile(chunk_encoder)
         encoder = torch.compile(encoder)
+        target_chunk_encoder = torch.compile(target_chunk_encoder)
         target_encoder = torch.compile(target_encoder)
         predictor = torch.compile(predictor)
 
@@ -245,10 +263,6 @@ def main():
         encoder = DDP(encoder, device_ids=[local_rank])
         predictor = DDP(predictor, device_ids=[local_rank])
         # Note: target_encoder is not wrapped in DDP as it doesn't need gradients
-
-    def get_module(model):
-        """Get the underlying module from DDP wrapper if needed."""
-        return model.module if hasattr(model, 'module') else model
 
     # See https://arxiv.org/abs/2507.07101 for beta2 scaling.
     beta2 = (0.95)**(1.0/(512/args.batch_size))
@@ -310,15 +324,8 @@ def main():
                 for group_idx, param_group in enumerate(optimizer.param_groups):
                     param_group['lr'] = initial_lrs[opt_idx][group_idx] * lr_scale
 
-        loss = train_step(chunk_encoder, encoder, target_encoder, predictor, batch, optimizers)
+        loss = train_step(chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor, batch, optimizers)
         batch_time = time.perf_counter() - batch_start_time
-
-        # Update target encoder with EMA of context encoder
-        # Handle DDP wrapper if present
-        with torch.no_grad():
-            context_model = get_module(encoder)
-            for param_q, param_k in zip(encoder.parameters(), target_encoder.parameters()):
-                param_k.data.mul_(args.ema_decay).add_((1.-args.ema_decay) * param_q.detach().data)
 
         # Update learning rate schedulers (after warmup)
         if step >= args.warmup_steps:
@@ -334,10 +341,9 @@ def main():
 
         if step % args.val_loss_every == 0 and step > 0:
             val_loss = validate(
-                chunk_encoder, encoder, target_encoder, predictor,
+                chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor,
                 val_loader
             )
-
             if rank == 0:
                 print(f'Step {step} | Validation Loss: {val_loss:.4f}')
                 if experiment:
@@ -348,6 +354,7 @@ def main():
                 'step': step,
                 'chunk_encoder': get_module(chunk_encoder).state_dict(),
                 'context_encoder': get_module(encoder).state_dict(),
+                'target_chunk_encoder': target_chunk_encoder.state_dict(),
                 'target_encoder': target_encoder.state_dict(),
                 'predictor': get_module(predictor).state_dict(),
                 'optimizers': [opt.state_dict() for opt in optimizers],
@@ -363,6 +370,7 @@ def main():
             'step': args.num_steps,
             'chunk_encoder': get_module(chunk_encoder).state_dict(),
             'context_encoder': get_module(encoder).state_dict(),
+            'target_chunk_encoder': target_chunk_encoder.state_dict(),
             'target_encoder': target_encoder.state_dict(),
             'predictor': get_module(predictor).state_dict(),
             'optimizers': [opt.state_dict() for opt in optimizers],
