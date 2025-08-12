@@ -33,6 +33,30 @@ def cleanup_distributed():
     if dist.is_initialized():
         dist.destroy_process_group()
 
+def extract_visible_chunks(chunk_embeddings, chunk_mask):
+    """
+    Extract only visible (non-masked) chunks from chunk embeddings.
+    Args:
+        chunk_embeddings: (B, n_chunks, D) all chunk embeddings
+        chunk_mask: (B, n_chunks) boolean mask where True = masked
+    Returns:
+        visible_chunks: (B, max_visible, D) tensor containing only visible chunks
+    """
+    B, n_chunks, D = chunk_embeddings.shape
+    visible_mask = ~chunk_mask  # True for visible positions
+    # Gather only visible chunks for context encoder
+    n_visible_per_batch = visible_mask.sum(dim=1)  # (B,)
+    max_visible = n_visible_per_batch.max().item()
+    # Create tensor with only visible chunks (pre-allocate for efficiency)
+    visible_chunks = torch.zeros(B, max_visible, D, device=chunk_embeddings.device, dtype=chunk_embeddings.dtype)
+    # Vectorized gathering with better memory patterns
+    for b in range(B):
+        n_visible = n_visible_per_batch[b].item()
+        if n_visible > 0:
+            # Use contiguous slicing for better memory access
+            visible_chunks[b, :n_visible] = chunk_embeddings[b, visible_mask[b]]
+    return visible_chunks
+
 def compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions, chunk_mask):
     """
     Compute JEPA loss between predicted and target embeddings.
@@ -46,15 +70,12 @@ def compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions,
     """
     B, max_targets, D = predicted_embeddings.shape
     device = predicted_embeddings.device
-
     # Gather target embeddings for masked positions using advanced indexing
     batch_indices = torch.arange(B, device=device).unsqueeze(1).expand(B, max_targets)
     gathered_targets = target_embeddings[batch_indices, target_positions]
-
     # Create valid mask for non-padding positions
     n_masked_per_batch = chunk_mask.sum(dim=1)  # (B,)
     valid_mask = torch.arange(max_targets, device=device).unsqueeze(0) < n_masked_per_batch.unsqueeze(1)
-
     if valid_mask.any():
         # Compute L1 loss only on valid positions
         loss = F.l1_loss(
@@ -73,37 +94,17 @@ def train_step(
     target_positions = batch['target_positions']
     amp_context = torch.autocast(device_type='cuda', dtype=torch.bfloat16)
     with amp_context:
-        # 1. Encode tokens to chunks
+        # Encode tokens to chunks
         chunk_embeddings = chunk_encoder(tokens)
-
-        # 2. I-JEPA style: Extract ONLY visible chunks for context encoder
-        B, n_chunks, D = chunk_embeddings.shape
-        visible_mask = ~chunk_mask  # True for visible positions
-
-        # Gather only visible chunks for context encoder
-        n_visible_per_batch = visible_mask.sum(dim=1)  # (B,)
-        max_visible = n_visible_per_batch.max().item()
-
-        # Create tensor with only visible chunks (pre-allocate for efficiency)
-        visible_chunks = torch.zeros(B, max_visible, D, device=chunk_embeddings.device, dtype=chunk_embeddings.dtype)
-
-        # Vectorized gathering with better memory patterns
-        for b in range(B):
-            n_visible = n_visible_per_batch[b].item()
-            if n_visible > 0:
-                # Use contiguous slicing for better memory access
-                visible_chunks[b, :n_visible] = chunk_embeddings[b, visible_mask[b]]
-
-        # 3. Context encoder processes ONLY visible chunks
+        # I-JEPA style: Extract ONLY visible chunks for context encoder
+        visible_chunks = extract_visible_chunks(chunk_embeddings, chunk_mask)
+        # Context encoder processes ONLY visible chunks
         context_embeddings = context_encoder(visible_chunks)
-
-        # 4. Target path processes ALL chunks (no masking, no gradients)
+        # Target path processes ALL chunks (no masking, no gradients)
         with torch.no_grad():
             target_embeddings = target_encoder(chunk_embeddings)
-
-        # 5. Predict masked chunks using context from visible chunks only
+        # Predict masked chunks using context from visible chunks only
         predicted_embeddings = predictor(context_embeddings, target_positions)
-        # 6. Compute loss
         loss = compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions, chunk_mask)
     loss.backward()
     for optimizer in optimizers:
@@ -118,43 +119,23 @@ def validate(chunk_encoder, context_encoder, target_encoder, predictor, val_load
     predictor.eval()
     val_losses = []
     amp_context = torch.autocast(device_type='cuda', dtype=torch.bfloat16)
-    with torch.no_grad():
-        for _ in range(50):  # Validate on 50 batches
-            batch = val_loader.next_batch()
-            with amp_context:
-                chunk_embeddings = chunk_encoder(batch['tokens'])
-                chunk_mask = batch['chunk_mask']
-
-                # I-JEPA style: Extract ONLY visible chunks for context encoder
-                B, n_chunks, D = chunk_embeddings.shape
-                visible_mask = ~chunk_mask
-
-                # Gather only visible chunks for context encoder
-                n_visible_per_batch = visible_mask.sum(dim=1)
-                max_visible = n_visible_per_batch.max().item()
-
-                # Create tensor with only visible chunks (pre-allocate for efficiency)
-                visible_chunks = torch.zeros(B, max_visible, D, device=chunk_embeddings.device, dtype=chunk_embeddings.dtype)
-
-                # Vectorized gathering with better memory patterns
-                for b in range(B):
-                    n_visible = n_visible_per_batch[b].item()
-                    if n_visible > 0:
-                        # Use contiguous slicing for better memory access
-                        visible_chunks[b, :n_visible] = chunk_embeddings[b, visible_mask[b]]
-
-                # Context encoder processes ONLY visible chunks
-                context_embeddings = context_encoder(visible_chunks)
-
-                # Target encoder processes ALL chunks
-                target_embeddings = target_encoder(chunk_embeddings)
-
-                predicted_embeddings = predictor(context_embeddings, batch['target_positions'])
-                loss = compute_jepa_loss(
-                    predicted_embeddings, target_embeddings,
-                    batch['target_positions'], batch['chunk_mask']
-                )
-                val_losses.append(loss.item())
+    for _ in range(50):  # Validate on 50 batches
+        batch = val_loader.next_batch()
+        with amp_context, torch.no_grad():
+            chunk_embeddings = chunk_encoder(batch['tokens'])
+            chunk_mask = batch['chunk_mask']
+            # I-JEPA style: Extract ONLY visible chunks for context encoder
+            visible_chunks = extract_visible_chunks(chunk_embeddings, chunk_mask)
+            # Context encoder processes ONLY visible chunks
+            context_embeddings = context_encoder(visible_chunks)
+            # Target encoder processes ALL chunks
+            target_embeddings = target_encoder(chunk_embeddings)
+            predicted_embeddings = predictor(context_embeddings, batch['target_positions'])
+            loss = compute_jepa_loss(
+                predicted_embeddings, target_embeddings,
+                batch['target_positions'], batch['chunk_mask']
+            )
+            val_losses.append(loss.item())
     chunk_encoder.train()
     context_encoder.train()
     target_encoder.train()
