@@ -272,15 +272,12 @@ class Encoder(nn.Module):
         self.config = config
         self.n_embd = config.n_embd
         self.chunk_pos_embedding = nn.Parameter(torch.zeros(1, config.max_chunks, config.n_embd))
-        self.mask_embedding = nn.Parameter(torch.randn(1, 1, config.n_embd))
         self.blocks = nn.ModuleList([Block(config, chunked=False) for _ in range(config.n_layer)])
 
     def forward(self, chunk_embeddings: torch.Tensor):
         """
         Args:
             chunk_embeddings: Tensor of shape (B, k, n_embd) containing chunk embeddings
-            chunk_mask: Optional boolean mask of shape (B, k) where True indicates
-                       a chunk should be masked. Default None (no masking).
         Returns:
             Tensor of shape (B, k, n_embd) containing contextualized chunk representations
         """
