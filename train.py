@@ -97,7 +97,7 @@ def compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions,
         return torch.tensor(0.0, device=device, dtype=predicted_embeddings.dtype)
 
 def train_step(
-    chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor, batch, optimizers, ema_decay):
+    chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor, batch, optimizers):
     tokens = batch['tokens']
     chunk_mask = batch['chunk_mask']
     target_positions = batch['target_positions']
@@ -124,13 +124,6 @@ def train_step(
     for optimizer in optimizers:
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
-    with torch.no_grad():
-        chunk_model = get_module(chunk_encoder)
-        for param_q, param_k in zip(chunk_model.parameters(), target_chunk_encoder.parameters()):
-            param_k.data.mul_(ema_decay).add_(param_q.data, alpha=1 - ema_decay)
-        context_model = get_module(encoder)
-        for param_q, param_k in zip(context_model.parameters(), target_encoder.parameters()):
-            param_k.data.mul_(ema_decay).add_(param_q.data, alpha=1 - ema_decay)
     return loss.item()
 
 def validate(chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor, val_loader):
@@ -178,7 +171,8 @@ def main():
     parser.add_argument('--num_steps', type=int, default=None, help='Number of training steps')
     parser.add_argument('--dataset_path', type=str, default='data/fineweb-edu_10B', help='Path to dataset')
     parser.add_argument('--warmup_steps', type=int, default=None, help='Number of warmup steps')
-    parser.add_argument('--ema_decay', type=float, default=0.999, help='EMA decay rate')
+    parser.add_argument('--ema_start', type=float, default=0.996, help='Starting EMA decay rate')
+    parser.add_argument('--ema_end', type=float, default=1.0, help='Final EMA decay rate')
     parser.add_argument('--mask_ratio', type=float, default=0.50, help='Chunk masking ratio')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--compile', action='store_true', help='Use torch.compile')
@@ -216,7 +210,7 @@ def main():
         print(f'  Weight decay: {args.weight_decay}')
         print(f'  Warmup steps: {args.warmup_steps}')
         print(f'  Mask ratio: {args.mask_ratio}')
-        print(f'  EMA decay: {args.ema_decay}')
+        print(f'  EMA decay: {args.ema_start:.4f} -> {args.ema_end:.4f}')
         print(f'  Beta2: {beta2:.6f}')
 
     chunk_enc_config = ChunkEncoderConfig(
@@ -255,6 +249,8 @@ def main():
             experiment.log_parameter('tokens_per_step', seq_len * args.batch_size * world_size)
             experiment.log_parameter('seq_len', seq_len)
             experiment.log_parameter('beta2', beta2)
+            experiment.log_parameter('ema_start', args.ema_start)
+            experiment.log_parameter('ema_end', args.ema_end)
         except ImportError:
             print('Comet ML not installed, continuing without logging')
 
@@ -325,6 +321,11 @@ def main():
     for optimizer in optimizers:
         initial_lrs.append([group['lr'] for group in optimizer.param_groups])
 
+    # Create EMA decay schedule (linear from ema_start to ema_end)
+    def get_ema_decay(step):
+        progress = min(step / args.num_steps, 1.0)
+        return args.ema_start + progress * (args.ema_end - args.ema_start)
+
     for step in range(args.num_steps):
         batch_start_time = time.perf_counter()
         batch = train_loader.next_batch()
@@ -337,8 +338,20 @@ def main():
                     param_group['lr'] = initial_lrs[opt_idx][group_idx] * lr_scale
 
         loss = train_step(
-            chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor, batch, optimizers, args.ema_decay)
+            chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor, batch, optimizers)
         batch_time = time.perf_counter() - batch_start_time
+
+        # Update target encoders with EMA using scheduled decay
+        current_ema = get_ema_decay(step)
+        with torch.no_grad():
+            # Update target chunk encoder
+            chunk_model = get_module(chunk_encoder)
+            for param_q, param_k in zip(chunk_model.parameters(), target_chunk_encoder.parameters()):
+                param_k.data.mul_(current_ema).add_(param_q.data, alpha=1 - current_ema)
+            # Update target context encoder
+            context_model = get_module(encoder)
+            for param_q, param_k in zip(context_model.parameters(), target_encoder.parameters()):
+                param_k.data.mul_(current_ema).add_(param_q.data, alpha=1 - current_ema)
 
         # Update learning rate schedulers (after warmup)
         if step >= args.warmup_steps:
@@ -347,10 +360,11 @@ def main():
 
         if rank == 0 and step % 10 == 0:
             current_lr = optimizers[0].param_groups[0]['lr']
-            print(f'Step {step}/{args.num_steps} | Loss: {loss:.4f} | LR: {current_lr:.6f} | Time: {batch_time*1e3:.0f}ms')
+            print(f'Step {step}/{args.num_steps} | Loss: {loss:.4f} | LR: {current_lr:.6f} | EMA: {current_ema:.4f} | Time: {batch_time*1e3:.0f}ms')
             if experiment:
                 experiment.log_metric('train_loss', loss, step=step)
                 experiment.log_metric('lr', current_lr, step=step)
+                experiment.log_metric('ema_decay', current_ema, step=step)
 
         if step % args.val_loss_every == 0 and step > 0:
             val_loss = validate(
@@ -372,7 +386,7 @@ def main():
                 'predictor': get_module(predictor).state_dict(),
                 'optimizers': [opt.state_dict() for opt in optimizers],
                 'schedulers': [sched.state_dict() for sched in schedulers],
-                'ema_decay': args.ema_decay,
+                'current_ema': current_ema,
                 'args': args,
             }
             torch.save(checkpoint, f'checkpoint_step_{step}.pt')
