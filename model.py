@@ -258,10 +258,7 @@ class ChunkEncoder(nn.Module):
         return chunk_embeddings  # (B, k, n_embd)
 
     def configure_optimizers(self, wd, adam_lr, adam_betas):
-        return [
-            Muon(self.transformer.parameters(), lr=10*adam_lr, weight_decay=0, momentum=0.95),
-            torch.optim.AdamW(self.wte.parameters(), lr=adam_lr, weight_decay=wd, betas=adam_betas)
-        ]
+        return torch.optim.AdamW(self.parameters(), lr=adam_lr, weight_decay=wd, betas=adam_betas)
 
 @dataclass
 class EncoderConfig:
@@ -303,9 +300,8 @@ class Encoder(nn.Module):
         x = norm(x)
         return x
 
-    def configure_optimizers(self, adam_lr):
-        """Configure Muon optimizer with 10x the base learning rate."""
-        return Muon(self.parameters(), lr=10*adam_lr, weight_decay=0.1, momentum=0.95)
+    def configure_optimizers(self, wd, adam_lr, adam_betas):
+        return torch.optim.AdamW(self.parameters(), lr=adam_lr, weight_decay=wd, betas=adam_betas)
 
 
 @dataclass
@@ -352,6 +348,5 @@ class Predictor(nn.Module):
         x = self.output_proj(norm(x))
         return x
 
-    def configure_optimizers(self, adam_lr):
-        """Configure Muon optimizer with 10x the base learning rate."""
-        return Muon(self.parameters(), lr=10*adam_lr, weight_decay=0.1, momentum=0.95)
+    def configure_optimizers(self, wd, adam_lr, adam_betas):
+        return torch.optim.AdamW(self.parameters(), lr=adam_lr, weight_decay=wd, betas=adam_betas)

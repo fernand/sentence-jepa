@@ -257,14 +257,13 @@ def main():
         wd=0.1, adam_lr=args.learning_rate, adam_betas=(0.9, beta2)
     )
     context_enc_optimizer = context_encoder.module.configure_optimizers(
-        args.learning_rate
+        wd=0.1, adam_lr=args.learning_rate, adam_betas=(0.9, beta2)
     ) if is_distributed else context_encoder.configure_optimizers(args.learning_rate)
     predictor_optimizer = predictor.module.configure_optimizers(
-        args.learning_rate
+        wd=0.1, adam_lr=args.learning_rate, adam_betas=(0.9, beta2)
     ) if is_distributed else predictor.configure_optimizers(args.learning_rate)
 
-    optimizers = [chunk_enc_optimizers[0], chunk_enc_optimizers[1],
-                  context_enc_optimizer, predictor_optimizer]
+    optimizers = [chunk_enc_optimizers, context_enc_optimizer, predictor_optimizer]
 
     schedulers = []
     for optimizer in optimizers:
@@ -331,7 +330,7 @@ def main():
 
         if rank == 0 and step % 10 == 0:
             current_lr = optimizers[0].param_groups[0]['lr']
-            print(f'Step {step}/{args.num_steps} | Loss: {loss:.4f} | LR: {current_lr:.6f} | Time: {batch_time:.3f}s')
+            print(f'Step {step}/{args.num_steps} | Loss: {loss:.4f} | LR: {current_lr:.6f} | Time: {batch_time*1e3:.f}ms')
 
             if experiment:
                 experiment.log_metric('train_loss', loss, step=step)
