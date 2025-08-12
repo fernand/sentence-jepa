@@ -165,7 +165,7 @@ def validate(chunk_encoder, encoder, target_chunk_encoder, target_encoder, predi
 def main():
     parser = argparse.ArgumentParser(description='Train JEPA model')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size per GPU')
-    parser.add_argument('--learning_rate', type=float, default=3e-4, help='Base learning rate')
+    parser.add_argument('--learning_rate', type=float, default=1e-3, help='Max learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.04, help='Starting weight decay for AdamW optimizer')
     parser.add_argument('--final_weight_decay', type=float, default=0.4, help='Final weight decay for AdamW optimizer')
     parser.add_argument('--val_loss_every', type=int, default=250, help='Validation frequency')
@@ -383,7 +383,7 @@ def main():
 
         if rank == 0 and step % 10 == 0:
             current_lr = optimizers[0].param_groups[0]['lr']
-            print(f'Step {step}/{args.num_steps} | Loss: {loss:.4f} | LR: {current_lr:.6f} | WD: {current_wd:.4f} | EMA: {current_ema:.4f} | Time: {batch_time*1e3:.0f}ms')
+            print(f'Step {step}/{args.num_steps} | Loss: {loss:.4f} | LR: {current_lr:.6f} | Time: {batch_time*1e3:.0f}ms')
             if experiment:
                 experiment.log_metric('train_loss', loss, step=step)
                 experiment.log_metric('lr', current_lr, step=step)
