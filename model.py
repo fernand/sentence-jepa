@@ -275,7 +275,7 @@ class Encoder(nn.Module):
         self.mask_embedding = nn.Parameter(torch.randn(1, 1, config.n_embd))
         self.blocks = nn.ModuleList([Block(config, chunked=False) for _ in range(config.n_layer)])
 
-    def forward(self, chunk_embeddings: torch.Tensor, chunk_mask: torch.BoolTensor = None):
+    def forward(self, chunk_embeddings: torch.Tensor):
         """
         Args:
             chunk_embeddings: Tensor of shape (B, k, n_embd) containing chunk embeddings
@@ -286,13 +286,6 @@ class Encoder(nn.Module):
         """
         B, k, D = chunk_embeddings.shape
         x = chunk_embeddings + self.chunk_pos_embedding[:, :k, :]
-        if chunk_mask is not None:
-            assert chunk_mask.shape == (B, k), \
-                f"chunk_mask shape {chunk_mask.shape} doesn't match expected ({B}, {k})"
-            # Replace masked positions with mask embedding
-            mask_emb = self.mask_embedding.expand(B, k, D)
-            chunk_mask_expanded = chunk_mask.unsqueeze(-1).expand(-1, -1, D)
-            x = torch.where(chunk_mask_expanded, mask_emb, x)
         for block in self.blocks:
             x = block(x)
         x = norm(x)
