@@ -250,18 +250,21 @@ def main():
         predictor = DDP(predictor, device_ids=[local_rank])
         # Note: target_encoder is not wrapped in DDP as it doesn't need gradients
 
+    def get_module(model):
+        """Get the underlying module from DDP wrapper if needed."""
+        return model.module if hasattr(model, 'module') else model
+
+    # See https://arxiv.org/abs/2507.07101 for beta2 scaling.
     beta2 = (0.95)**(1.0/(512/args.batch_size))
-    chunk_enc_optimizers = chunk_encoder.module.configure_optimizers(
-        wd=0.1, adam_lr=args.learning_rate, adam_betas=(0.9, beta2)
-    ) if is_distributed else chunk_encoder.configure_optimizers(
+    chunk_enc_optimizers = get_module(chunk_encoder).configure_optimizers(
         wd=0.1, adam_lr=args.learning_rate, adam_betas=(0.9, beta2)
     )
-    context_enc_optimizer = context_encoder.module.configure_optimizers(
+    context_enc_optimizer = get_module(context_encoder).configure_optimizers(
         wd=0.1, adam_lr=args.learning_rate, adam_betas=(0.9, beta2)
-    ) if is_distributed else context_encoder.configure_optimizers(args.learning_rate)
-    predictor_optimizer = predictor.module.configure_optimizers(
+    )
+    predictor_optimizer = get_module(predictor).configure_optimizers(
         wd=0.1, adam_lr=args.learning_rate, adam_betas=(0.9, beta2)
-    ) if is_distributed else predictor.configure_optimizers(args.learning_rate)
+    )
 
     optimizers = [chunk_enc_optimizers, context_enc_optimizer, predictor_optimizer]
 
@@ -350,10 +353,10 @@ def main():
         if rank == 0 and step % 5000 == 0 and step > 0:
             checkpoint = {
                 'step': step,
-                'chunk_encoder': chunk_encoder.module.state_dict() if is_distributed else chunk_encoder.state_dict(),
-                'context_encoder': context_encoder.module.state_dict() if is_distributed else context_encoder.state_dict(),
+                'chunk_encoder': get_module(chunk_encoder).state_dict(),
+                'context_encoder': get_module(context_encoder).state_dict(),
                 'target_encoder': target_encoder.state_dict(),
-                'predictor': predictor.module.state_dict() if is_distributed else predictor.state_dict(),
+                'predictor': get_module(predictor).state_dict(),
                 'optimizers': [opt.state_dict() for opt in optimizers],
                 'schedulers': [sched.state_dict() for sched in schedulers],
                 'ema': ema.shadow,
@@ -365,10 +368,10 @@ def main():
     if rank == 0:
         checkpoint = {
             'step': args.num_steps,
-            'chunk_encoder': chunk_encoder.module.state_dict() if is_distributed else chunk_encoder.state_dict(),
-            'context_encoder': context_encoder.module.state_dict() if is_distributed else context_encoder.state_dict(),
+            'chunk_encoder': get_module(chunk_encoder).state_dict(),
+            'context_encoder': get_module(context_encoder).state_dict(),
             'target_encoder': target_encoder.state_dict(),
-            'predictor': predictor.module.state_dict() if is_distributed else predictor.state_dict(),
+            'predictor': get_module(predictor).state_dict(),
             'optimizers': [opt.state_dict() for opt in optimizers],
             'schedulers': [sched.state_dict() for sched in schedulers],
             'ema': ema.shadow,
