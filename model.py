@@ -215,7 +215,6 @@ class ChunkEncoder(nn.Module):
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         self.transformer = nn.ModuleList([Block(config, chunked=True) for _ in range(config.n_layer)])
         self.cls_token = nn.Parameter(torch.randn(1, 1, config.n_embd))
-        self.cls_pos_embedding = nn.Parameter(torch.zeros(1, 1, config.n_embd))
 
     def forward(self, idx: torch.LongTensor):
         """
@@ -242,7 +241,6 @@ class ChunkEncoder(nn.Module):
 
         # Prepare CLS tokens for each chunk
         cls_tokens = self.cls_token.expand(B, n_chunks, 1, self.config.n_embd)
-        cls_tokens = cls_tokens + self.cls_pos_embedding
         x = torch.cat([cls_tokens, x], dim=2)  # (B, n_chunks, chunk_size, n_embd)
         x = x.view(B, n_chunks * chunk_size, self.config.n_embd)
         for block in self.transformer:
