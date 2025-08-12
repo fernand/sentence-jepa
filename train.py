@@ -1,6 +1,7 @@
 import argparse
 import copy
 import os
+import time
 
 import torch
 import torch.distributed as dist
@@ -77,18 +78,18 @@ def compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions,
     """
     B, max_targets, D = predicted_embeddings.shape
     device = predicted_embeddings.device
-    
+
     # Gather target embeddings for masked positions using advanced indexing
     batch_indices = torch.arange(B, device=device).unsqueeze(1).expand(B, max_targets)
     gathered_targets = target_embeddings[batch_indices, target_positions]
-    
+
     # Create valid mask for non-padding positions
     # Positions are padded with 0, but 0 could be a valid position
     # So we check against the actual mask
     n_masked_per_batch = chunk_mask.sum(dim=1)  # (B,)
     position_indices = torch.arange(max_targets, device=device).unsqueeze(0).expand(B, max_targets)
     valid_mask = position_indices < n_masked_per_batch.unsqueeze(1)
-    
+
     if valid_mask.any():
         # Compute L1 loss only on valid positions
         loss = F.l1_loss(
@@ -304,6 +305,7 @@ def main():
         initial_lrs.append([group['lr'] for group in optimizer.param_groups])
 
     for step in range(args.num_steps):
+        batch_start_time = time.perf_counter()
         batch = train_loader.next_batch()
 
         # Apply warmup or cosine schedule
@@ -315,6 +317,7 @@ def main():
                     param_group['lr'] = initial_lrs[opt_idx][group_idx] * lr_scale
 
         loss = train_step(chunk_encoder, context_encoder, target_encoder, predictor, batch, optimizers)
+        batch_time = time.perf_counter() - batch_start_time
 
         # Update EMA - copy context encoder params to target encoder with momentum
         with torch.no_grad():
@@ -328,7 +331,7 @@ def main():
 
         if rank == 0 and step % 10 == 0:
             current_lr = optimizers[0].param_groups[0]['lr']
-            print(f'Step {step}/{args.num_steps} | Loss: {loss:.4f} | LR: {current_lr:.6f}')
+            print(f'Step {step}/{args.num_steps} | Loss: {loss:.4f} | LR: {current_lr:.6f} | Time: {batch_time:.3f}s')
 
             if experiment:
                 experiment.log_metric('train_loss', loss, step=step)
