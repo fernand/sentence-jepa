@@ -165,7 +165,7 @@ def validate(chunk_encoder, encoder, target_chunk_encoder, target_encoder, predi
 def main():
     parser = argparse.ArgumentParser(description='Train JEPA model')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size per GPU')
-    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Base learning rate')
+    parser.add_argument('--learning_rate', type=float, default=3e-4, help='Base learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.04, help='Starting weight decay for AdamW optimizer')
     parser.add_argument('--final_weight_decay', type=float, default=0.4, help='Final weight decay for AdamW optimizer')
     parser.add_argument('--val_loss_every', type=int, default=250, help='Validation frequency')
@@ -329,7 +329,7 @@ def main():
     def get_ema_decay(step):
         progress = min(step / args.num_steps, 1.0)
         return args.ema_start + progress * (args.ema_end - args.ema_start)
-    
+
     # Create weight decay schedule (cosine from weight_decay to final_weight_decay)
     def get_weight_decay(step):
         if step < args.warmup_steps:
@@ -353,7 +353,7 @@ def main():
             for opt_idx, optimizer in enumerate(optimizers):
                 for group_idx, param_group in enumerate(optimizer.param_groups):
                     param_group['lr'] = initial_lrs[opt_idx][group_idx] * lr_scale
-        
+
         # Update weight decay for all optimizers
         current_wd = get_weight_decay(step)
         for optimizer in optimizers:
