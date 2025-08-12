@@ -172,6 +172,7 @@ def main():
     parser = argparse.ArgumentParser(description='Train JEPA model')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size per GPU')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Base learning rate')
+    parser.add_argument('--weight_decay', type=float, default=0.1, help='Weight decay for AdamW optimizer')
     parser.add_argument('--val_loss_every', type=int, default=250, help='Validation frequency')
     parser.add_argument('--project_name', type=str, default='sentence-jepa', help='Comet ML project name')
     parser.add_argument('--num_steps', type=int, default=None, help='Number of training steps')
@@ -195,6 +196,15 @@ def main():
     if args.warmup_steps is None:
         args.warmup_steps = int(0.03 * args.num_steps)
 
+    # Model configuration
+    vocab_size = 65024  # Falcon tokenizer
+    chunk_size = 32
+    n_chunks = seq_len // chunk_size
+    n_embd = 768
+
+    # Beta2 scaling for optimizer
+    beta2 = (0.95)**(1.0/(512/args.batch_size))
+
     if rank == 0:
         print(f'Training configuration:')
         print(f'  World size: {world_size}')
@@ -203,26 +213,11 @@ def main():
         print(f'  Sequence length: {seq_len}')
         print(f'  Number of steps: {args.num_steps}')
         print(f'  Learning rate: {args.learning_rate}')
+        print(f'  Weight decay: {args.weight_decay}')
         print(f'  Warmup steps: {args.warmup_steps}')
         print(f'  Mask ratio: {args.mask_ratio}')
-
-    experiment = None
-    if args.use_comet and rank == 0:
-        try:
-            import comet_ml
-            experiment = comet_ml.Experiment(
-                project_name=args.project_name,
-                auto_metric_logging=True,
-                auto_param_logging=True,
-            )
-            experiment.log_parameters(vars(args))
-        except ImportError:
-            print('Comet ML not installed, continuing without logging')
-
-    vocab_size = 65024  # Falcon tokenizer
-    chunk_size = 32
-    n_chunks = seq_len // chunk_size
-    n_embd = 768
+        print(f'  EMA decay: {args.ema_decay}')
+        print(f'  Beta2: {beta2:.6f}')
 
     chunk_enc_config = ChunkEncoderConfig(
         vocab_size=vocab_size,
@@ -245,6 +240,25 @@ def main():
         n_encoder_embd=n_embd
     )
 
+    # Initialize Comet ML experiment
+    experiment = None
+    if args.use_comet and rank == 0:
+        try:
+            import comet_ml
+            experiment = comet_ml.Experiment(
+                project_name=args.project_name,
+                auto_metric_logging=True,
+                auto_param_logging=True,
+            )
+            experiment.log_parameters(vars(args))
+            experiment.log_parameter('total_batch_size', args.batch_size * world_size)
+            experiment.log_parameter('world_size', world_size)
+            experiment.log_parameter('tokens_per_step', seq_len * args.batch_size * world_size)
+            experiment.log_parameter('seq_len', seq_len)
+            experiment.log_parameter('beta2', beta2)
+        except ImportError:
+            print('Comet ML not installed, continuing without logging')
+
     chunk_encoder = ChunkEncoder(chunk_enc_config).to(device)
     encoder = Encoder(enc_config).to(device)
     target_chunk_encoder = copy.deepcopy(chunk_encoder)  # EMA version of chunk encoder
@@ -264,16 +278,15 @@ def main():
         predictor = DDP(predictor, device_ids=[local_rank])
         # Note: target_encoder is not wrapped in DDP as it doesn't need gradients
 
-    # See https://arxiv.org/abs/2507.07101 for beta2 scaling.
-    beta2 = (0.95)**(1.0/(512/args.batch_size))
+    # Optimizers with beta2 scaling from https://arxiv.org/abs/2507.07101
     chunk_enc_optimizers = get_module(chunk_encoder).configure_optimizers(
-        wd=0.1, adam_lr=args.learning_rate, adam_betas=(0.9, beta2)
+        wd=args.weight_decay, adam_lr=args.learning_rate, adam_betas=(0.9, beta2)
     )
     context_enc_optimizer = get_module(encoder).configure_optimizers(
-        wd=0.1, adam_lr=args.learning_rate, adam_betas=(0.9, beta2)
+        wd=args.weight_decay, adam_lr=args.learning_rate, adam_betas=(0.9, beta2)
     )
     predictor_optimizer = get_module(predictor).configure_optimizers(
-        wd=0.1, adam_lr=args.learning_rate, adam_betas=(0.9, beta2)
+        wd=args.weight_decay, adam_lr=args.learning_rate, adam_betas=(0.9, beta2)
     )
 
     optimizers = [chunk_enc_optimizers, context_enc_optimizer, predictor_optimizer]
