@@ -230,19 +230,19 @@ def main():
     )
 
     chunk_encoder = ChunkEncoder(chunk_enc_config).to(device)
-    context_encoder = Encoder(enc_config).to(device)
-    target_encoder = copy.deepcopy(context_encoder)  # Start with same weights
+    encoder = Encoder(enc_config).to(device)
+    target_encoder = copy.deepcopy(encoder)  # Start with same weights
     predictor = Predictor(pred_config).to(device)
 
     if args.compile:
         chunk_encoder = torch.compile(chunk_encoder)
-        context_encoder = torch.compile(context_encoder)
+        encoder = torch.compile(encoder)
         target_encoder = torch.compile(target_encoder)
         predictor = torch.compile(predictor)
 
     if is_distributed:
         chunk_encoder = DDP(chunk_encoder, device_ids=[local_rank])
-        context_encoder = DDP(context_encoder, device_ids=[local_rank])
+        encoder = DDP(encoder, device_ids=[local_rank])
         predictor = DDP(predictor, device_ids=[local_rank])
         # Note: target_encoder is not wrapped in DDP as it doesn't need gradients
 
@@ -255,7 +255,7 @@ def main():
     chunk_enc_optimizers = get_module(chunk_encoder).configure_optimizers(
         wd=0.1, adam_lr=args.learning_rate, adam_betas=(0.9, beta2)
     )
-    context_enc_optimizer = get_module(context_encoder).configure_optimizers(
+    context_enc_optimizer = get_module(encoder).configure_optimizers(
         wd=0.1, adam_lr=args.learning_rate, adam_betas=(0.9, beta2)
     )
     predictor_optimizer = get_module(predictor).configure_optimizers(
@@ -310,15 +310,15 @@ def main():
                 for group_idx, param_group in enumerate(optimizer.param_groups):
                     param_group['lr'] = initial_lrs[opt_idx][group_idx] * lr_scale
 
-        loss = train_step(chunk_encoder, context_encoder, target_encoder, predictor, batch, optimizers)
+        loss = train_step(chunk_encoder, encoder, target_encoder, predictor, batch, optimizers)
         batch_time = time.perf_counter() - batch_start_time
 
         # Update target encoder with EMA of context encoder
         # Handle DDP wrapper if present
         with torch.no_grad():
-            context_model = get_module(context_encoder)
-            for target_param, context_param in zip(target_encoder.parameters(), context_model.parameters()):
-                target_param.data.mul_(args.ema_decay).add_(context_param.data, alpha=1 - args.ema_decay)
+            context_model = get_module(encoder)
+            for param_q, param_k in zip(encoder.parameters(), target_encoder.parameters()):
+                param_k.data.mul_(args.ema_decay).add_((1.-args.ema_decay) * param_q.detach().data)
 
         # Update learning rate schedulers (after warmup)
         if step >= args.warmup_steps:
@@ -334,7 +334,7 @@ def main():
 
         if step % args.val_loss_every == 0 and step > 0:
             val_loss = validate(
-                chunk_encoder, context_encoder, target_encoder, predictor,
+                chunk_encoder, encoder, target_encoder, predictor,
                 val_loader
             )
 
@@ -347,7 +347,7 @@ def main():
             checkpoint = {
                 'step': step,
                 'chunk_encoder': get_module(chunk_encoder).state_dict(),
-                'context_encoder': get_module(context_encoder).state_dict(),
+                'context_encoder': get_module(encoder).state_dict(),
                 'target_encoder': target_encoder.state_dict(),
                 'predictor': get_module(predictor).state_dict(),
                 'optimizers': [opt.state_dict() for opt in optimizers],
@@ -362,7 +362,7 @@ def main():
         checkpoint = {
             'step': args.num_steps,
             'chunk_encoder': get_module(chunk_encoder).state_dict(),
-            'context_encoder': get_module(context_encoder).state_dict(),
+            'context_encoder': get_module(encoder).state_dict(),
             'target_encoder': target_encoder.state_dict(),
             'predictor': get_module(predictor).state_dict(),
             'optimizers': [opt.state_dict() for opt in optimizers],
