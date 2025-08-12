@@ -112,15 +112,32 @@ def train_step(
         chunk_embeddings = chunk_encoder(tokens)
         # 2. Context path (with masking)
         context_embeddings = context_encoder(chunk_embeddings, chunk_mask)
-        # 3. Target path (no masking, no gradients) - target encoder sees ALL chunks
+        # 3. Target path (no masking, no gradients)
         with torch.no_grad():
             target_embeddings = target_encoder(chunk_embeddings, chunk_mask=None)
-        # 4. Get only visible context chunks for predictor input
-        # Note: predictor should only receive non-masked context embeddings
-        visible_mask = ~chunk_mask  # Invert mask to get visible positions
-        context_for_predictor = context_embeddings  # Context encoder already applied masking
+        # 4. Extract only visible (non-masked) context chunks for predictor
+        # The predictor should only attend to visible chunks, not masked ones
+        B, n_chunks, D = context_embeddings.shape
+        visible_mask = ~chunk_mask  # True for visible positions
+        
+        # Gather visible chunks for each batch element
+        context_for_predictor = []
+        for b in range(B):
+            visible_indices = visible_mask[b].nonzero(as_tuple=True)[0]
+            if len(visible_indices) > 0:
+                context_for_predictor.append(context_embeddings[b, visible_indices])
+            else:
+                # Edge case: all chunks masked (shouldn't happen with proper masking)
+                context_for_predictor.append(context_embeddings[b, :1])  # Use first chunk as fallback
+        
+        # Stack with padding to max visible chunks
+        max_visible = max(ctx.shape[0] for ctx in context_for_predictor)
+        padded_context = torch.zeros(B, max_visible, D, device=context_embeddings.device, dtype=context_embeddings.dtype)
+        for b, ctx in enumerate(context_for_predictor):
+            padded_context[b, :ctx.shape[0]] = ctx
+        
         # 5. Predict masked chunks
-        predicted_embeddings = predictor(context_for_predictor, target_positions)
+        predicted_embeddings = predictor(padded_context, target_positions)
         # 6. Compute loss
         loss = compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions, chunk_mask)
     loss.backward()
@@ -144,7 +161,28 @@ def validate(chunk_encoder, context_encoder, target_encoder, predictor, val_load
                 chunk_embeddings = chunk_encoder(batch['tokens'])
                 context_embeddings = context_encoder(chunk_embeddings, batch['chunk_mask'])
                 target_embeddings = target_encoder(chunk_embeddings, chunk_mask=None)
-                predicted_embeddings = predictor(context_embeddings, batch['target_positions'])
+                
+                # Extract only visible context chunks for predictor
+                B, n_chunks, D = context_embeddings.shape
+                chunk_mask = batch['chunk_mask']
+                visible_mask = ~chunk_mask
+                
+                # Gather visible chunks for each batch element
+                context_for_predictor = []
+                for b in range(B):
+                    visible_indices = visible_mask[b].nonzero(as_tuple=True)[0]
+                    if len(visible_indices) > 0:
+                        context_for_predictor.append(context_embeddings[b, visible_indices])
+                    else:
+                        context_for_predictor.append(context_embeddings[b, :1])
+                
+                # Stack with padding to max visible chunks
+                max_visible = max(ctx.shape[0] for ctx in context_for_predictor)
+                padded_context = torch.zeros(B, max_visible, D, device=context_embeddings.device, dtype=context_embeddings.dtype)
+                for b, ctx in enumerate(context_for_predictor):
+                    padded_context[b, :ctx.shape[0]] = ctx
+                
+                predicted_embeddings = predictor(padded_context, batch['target_positions'])
                 loss = compute_jepa_loss(
                     predicted_embeddings, target_embeddings,
                     batch['target_positions'], batch['chunk_mask']
