@@ -1,5 +1,6 @@
 import argparse
 import copy
+import math
 import os
 import time
 
@@ -165,7 +166,8 @@ def main():
     parser = argparse.ArgumentParser(description='Train JEPA model')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size per GPU')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Base learning rate')
-    parser.add_argument('--weight_decay', type=float, default=0.2, help='Weight decay for AdamW optimizer')
+    parser.add_argument('--weight_decay', type=float, default=0.04, help='Starting weight decay for AdamW optimizer')
+    parser.add_argument('--final_weight_decay', type=float, default=0.4, help='Final weight decay for AdamW optimizer')
     parser.add_argument('--val_loss_every', type=int, default=250, help='Validation frequency')
     parser.add_argument('--project_name', type=str, default='sentence-jepa', help='Comet ML project name')
     parser.add_argument('--num_steps', type=int, default=None, help='Number of training steps')
@@ -207,7 +209,7 @@ def main():
         print(f'  Sequence length: {seq_len}')
         print(f'  Number of steps: {args.num_steps}')
         print(f'  Learning rate: {args.learning_rate}')
-        print(f'  Weight decay: {args.weight_decay}')
+        print(f'  Weight decay: {args.weight_decay:.4f} -> {args.final_weight_decay:.4f}')
         print(f'  Warmup steps: {args.warmup_steps}')
         print(f'  Mask ratio: {args.mask_ratio}')
         print(f'  EMA decay: {args.ema_start:.4f} -> {args.ema_end:.4f}')
@@ -251,6 +253,8 @@ def main():
             experiment.log_parameter('beta2', beta2)
             experiment.log_parameter('ema_start', args.ema_start)
             experiment.log_parameter('ema_end', args.ema_end)
+            experiment.log_parameter('weight_decay_start', args.weight_decay)
+            experiment.log_parameter('weight_decay_final', args.final_weight_decay)
         except ImportError:
             print('Comet ML not installed, continuing without logging')
 
@@ -325,17 +329,36 @@ def main():
     def get_ema_decay(step):
         progress = min(step / args.num_steps, 1.0)
         return args.ema_start + progress * (args.ema_end - args.ema_start)
+    
+    # Create weight decay schedule (cosine from weight_decay to final_weight_decay)
+    def get_weight_decay(step):
+        if step < args.warmup_steps:
+            # Use initial weight decay during warmup
+            return args.weight_decay
+        else:
+            # Cosine schedule after warmup
+            progress = (step - args.warmup_steps) / max(1, args.num_steps - args.warmup_steps)
+            progress = min(progress, 1.0)
+            # Cosine annealing from weight_decay to final_weight_decay
+            cosine_factor = 0.5 * (1 + math.cos(math.pi * progress))
+            return args.final_weight_decay + (args.weight_decay - args.final_weight_decay) * cosine_factor
 
     for step in range(args.num_steps):
         batch_start_time = time.perf_counter()
         batch = train_loader.next_batch()
-        # Apply warmup or cosine schedule
+        # Apply warmup or cosine schedule for learning rate
         if step < args.warmup_steps:
             # Linear warmup
             lr_scale = (step + 1) / args.warmup_steps
             for opt_idx, optimizer in enumerate(optimizers):
                 for group_idx, param_group in enumerate(optimizer.param_groups):
                     param_group['lr'] = initial_lrs[opt_idx][group_idx] * lr_scale
+        
+        # Update weight decay for all optimizers
+        current_wd = get_weight_decay(step)
+        for optimizer in optimizers:
+            for param_group in optimizer.param_groups:
+                param_group['weight_decay'] = current_wd
 
         loss = train_step(
             chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor, batch, optimizers)
@@ -360,10 +383,11 @@ def main():
 
         if rank == 0 and step % 10 == 0:
             current_lr = optimizers[0].param_groups[0]['lr']
-            print(f'Step {step}/{args.num_steps} | Loss: {loss:.4f} | LR: {current_lr:.6f} | EMA: {current_ema:.4f} | Time: {batch_time*1e3:.0f}ms')
+            print(f'Step {step}/{args.num_steps} | Loss: {loss:.4f} | LR: {current_lr:.6f} | WD: {current_wd:.4f} | EMA: {current_ema:.4f} | Time: {batch_time*1e3:.0f}ms')
             if experiment:
                 experiment.log_metric('train_loss', loss, step=step)
                 experiment.log_metric('lr', current_lr, step=step)
+                experiment.log_metric('weight_decay', current_wd, step=step)
                 experiment.log_metric('ema_decay', current_ema, step=step)
 
         if step % args.val_loss_every == 0 and step > 0:
