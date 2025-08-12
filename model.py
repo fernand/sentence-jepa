@@ -6,8 +6,6 @@ from torch import nn
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 import torch.nn.functional as F
 
-from muon import Muon
-
 class Rotary(nn.Module):
     def __init__(self, dim: int, max_seq_len: int, chunked: bool = False):
         super().__init__()
