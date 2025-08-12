@@ -33,37 +33,7 @@ def cleanup_distributed():
     if dist.is_initialized():
         dist.destroy_process_group()
 
-class EMA:
-    """Exponential Moving Average for model parameters."""
-    def __init__(self, model, decay):
-        self.model = model
-        self.decay = decay
-        self.shadow = {}
-        self.backup = {}
-        # Initialize shadow parameters
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = param.data.clone()
-
-    def update(self):
-        """Update shadow parameters."""
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = self.decay * self.shadow[name] + (1 - self.decay) * param.data
-
-    def apply_shadow(self):
-        """Apply shadow parameters to model."""
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                self.backup[name] = param.data
-                param.data = self.shadow[name]
-
-    def restore(self):
-        """Restore original parameters."""
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                param.data = self.backup[name]
-        self.backup = {}
+# EMA class removed - using direct parameter updates instead
 
 def compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions, chunk_mask):
     """
@@ -120,21 +90,24 @@ def train_step(
         B, n_chunks, D = context_embeddings.shape
         visible_mask = ~chunk_mask  # True for visible positions
 
-        # Gather visible chunks for each batch element
-        context_for_predictor = []
+        # Efficient vectorized gathering of visible chunks
+        # Count visible chunks per batch
+        n_visible_per_batch = visible_mask.sum(dim=1)  # (B,)
+        max_visible = n_visible_per_batch.max().item()
+        
+        # Create padded context tensor
+        padded_context = torch.zeros(B, max_visible, D, device=context_embeddings.device, dtype=context_embeddings.dtype)
+        
+        # Use advanced indexing to gather visible chunks efficiently
         for b in range(B):
-            visible_indices = visible_mask[b].nonzero(as_tuple=True)[0]
-            if len(visible_indices) > 0:
-                context_for_predictor.append(context_embeddings[b, visible_indices])
+            n_visible = n_visible_per_batch[b].item()
+            if n_visible > 0:
+                # Get visible chunks for this batch element
+                visible_chunks = context_embeddings[b][visible_mask[b]]
+                padded_context[b, :n_visible] = visible_chunks
             else:
                 # Edge case: all chunks masked (shouldn't happen with proper masking)
-                context_for_predictor.append(context_embeddings[b, :1])  # Use first chunk as fallback
-
-        # Stack with padding to max visible chunks
-        max_visible = max(ctx.shape[0] for ctx in context_for_predictor)
-        padded_context = torch.zeros(B, max_visible, D, device=context_embeddings.device, dtype=context_embeddings.dtype)
-        for b, ctx in enumerate(context_for_predictor):
-            padded_context[b, :ctx.shape[0]] = ctx
+                padded_context[b, 0] = context_embeddings[b, 0]
 
         # 5. Predict masked chunks
         predicted_embeddings = predictor(padded_context, target_positions)
@@ -167,20 +140,21 @@ def validate(chunk_encoder, context_encoder, target_encoder, predictor, val_load
                 chunk_mask = batch['chunk_mask']
                 visible_mask = ~chunk_mask
 
-                # Gather visible chunks for each batch element
-                context_for_predictor = []
-                for b in range(B):
-                    visible_indices = visible_mask[b].nonzero(as_tuple=True)[0]
-                    if len(visible_indices) > 0:
-                        context_for_predictor.append(context_embeddings[b, visible_indices])
-                    else:
-                        context_for_predictor.append(context_embeddings[b, :1])
-
-                # Stack with padding to max visible chunks
-                max_visible = max(ctx.shape[0] for ctx in context_for_predictor)
+                # Efficient vectorized gathering of visible chunks
+                n_visible_per_batch = visible_mask.sum(dim=1)
+                max_visible = n_visible_per_batch.max().item()
+                
+                # Create padded context tensor
                 padded_context = torch.zeros(B, max_visible, D, device=context_embeddings.device, dtype=context_embeddings.dtype)
-                for b, ctx in enumerate(context_for_predictor):
-                    padded_context[b, :ctx.shape[0]] = ctx
+                
+                # Use advanced indexing to gather visible chunks
+                for b in range(B):
+                    n_visible = n_visible_per_batch[b].item()
+                    if n_visible > 0:
+                        visible_chunks = context_embeddings[b][visible_mask[b]]
+                        padded_context[b, :n_visible] = visible_chunks
+                    else:
+                        padded_context[b, 0] = context_embeddings[b, 0]
 
                 predicted_embeddings = predictor(padded_context, batch['target_positions'])
                 loss = compute_jepa_loss(
@@ -314,8 +288,7 @@ def main():
         )
         schedulers.append(scheduler)
 
-    # EMA should update target encoder based on context encoder
-    ema = EMA(context_encoder, decay=args.ema_decay)
+    # EMA decay for target encoder updates
 
     train_pattern = os.path.join(args.dataset_path, 'fineweb-edu_train_*.bin')
     val_pattern = os.path.join(args.dataset_path, 'fineweb-edu_val_*.bin')
@@ -359,9 +332,11 @@ def main():
         loss = train_step(chunk_encoder, context_encoder, target_encoder, predictor, batch, optimizers)
         batch_time = time.perf_counter() - batch_start_time
 
-        # Update EMA - copy context encoder params to target encoder with momentum
+        # Update target encoder with EMA of context encoder
+        # Handle DDP wrapper if present
         with torch.no_grad():
-            for target_param, context_param in zip(target_encoder.parameters(), context_encoder.parameters()):
+            context_model = get_module(context_encoder)
+            for target_param, context_param in zip(target_encoder.parameters(), context_model.parameters()):
                 target_param.data.mul_(args.ema_decay).add_(context_param.data, alpha=1 - args.ema_decay)
 
         # Update learning rate schedulers (after warmup)
@@ -372,7 +347,6 @@ def main():
         if rank == 0 and step % 10 == 0:
             current_lr = optimizers[0].param_groups[0]['lr']
             print(f'Step {step}/{args.num_steps} | Loss: {loss:.4f} | LR: {current_lr:.6f} | Time: {batch_time*1e3:.0f}ms')
-
             if experiment:
                 experiment.log_metric('train_loss', loss, step=step)
                 experiment.log_metric('lr', current_lr, step=step)
@@ -397,7 +371,7 @@ def main():
                 'predictor': get_module(predictor).state_dict(),
                 'optimizers': [opt.state_dict() for opt in optimizers],
                 'schedulers': [sched.state_dict() for sched in schedulers],
-                'ema': ema.shadow,
+                'ema_decay': args.ema_decay,
                 'args': args,
             }
             torch.save(checkpoint, f'checkpoint_step_{step}.pt')
@@ -421,7 +395,6 @@ def main():
     cleanup_distributed()
     if experiment:
         experiment.end()
-
 
 if __name__ == '__main__':
     main()
