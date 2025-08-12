@@ -262,15 +262,26 @@ class Encoder(nn.Module):
         self.chunk_pos_embedding = nn.Parameter(torch.zeros(1, config.max_chunks, config.n_embd))
         self.blocks = nn.ModuleList([Block(config, chunked=False) for _ in range(config.n_layer)])
 
-    def forward(self, chunk_embeddings: torch.Tensor):
+    def forward(self, chunk_embeddings: torch.Tensor, chunk_positions: torch.LongTensor = None):
         """
         Args:
             chunk_embeddings: Tensor of shape (B, k, n_embd) containing chunk embeddings
+            chunk_positions: Optional tensor of shape (B, k) containing original chunk positions
         Returns:
             Tensor of shape (B, k, n_embd) containing contextualized chunk representations
         """
         B, k, D = chunk_embeddings.shape
-        x = chunk_embeddings + self.chunk_pos_embedding[:, :k, :]
+        
+        if chunk_positions is not None:
+            # Use provided positions to gather positional embeddings
+            pos_embeddings = self.chunk_pos_embedding.expand(B, -1, -1)  # (B, max_chunks, n_embd)
+            # Gather positional embeddings for the specified positions
+            x = chunk_embeddings + torch.gather(pos_embeddings, 1, 
+                                               chunk_positions.unsqueeze(-1).expand(-1, -1, D))
+        else:
+            # Fall back to sequential positions (backward compatibility)
+            x = chunk_embeddings + self.chunk_pos_embedding[:, :k, :]
+        
         for block in self.blocks:
             x = block(x)
         x = norm(x)
@@ -297,14 +308,18 @@ class Predictor(nn.Module):
         self.n_encoder_embd = config.n_encoder_embd
         self.context_proj = nn.Linear(config.n_encoder_embd, config.n_embd, bias=False)
         self.position_queries = nn.Parameter(torch.randn(1, config.max_chunks, config.n_embd))
+        self.target_pos_embedding = nn.Parameter(torch.zeros(1, config.max_chunks, config.n_embd))
+        self.context_pos_embedding = nn.Parameter(torch.zeros(1, config.max_chunks, config.n_embd))
         self.blocks = nn.ModuleList([PredictorBlock(config) for _ in range(config.n_layer)])
         self.output_proj = nn.Linear(config.n_embd, config.n_encoder_embd, bias=False)
 
-    def forward(self, context_embeddings: torch.Tensor, target_positions: torch.LongTensor):
+    def forward(self, context_embeddings: torch.Tensor, target_positions: torch.LongTensor, 
+                context_positions: torch.LongTensor = None):
         """
         Args:
             context_embeddings: Tensor of shape (B, n_context, n_encoder_embd) - visible chunk embeddings
             target_positions: Tensor of shape (B, n_target) - positions of chunks to predict
+            context_positions: Optional tensor of shape (B, n_context) - original positions of context chunks
 
         Returns:
             Tensor of shape (B, n_target, n_encoder_embd) - predicted embeddings for masked positions
@@ -313,12 +328,29 @@ class Predictor(nn.Module):
         n_target = target_positions.shape[1]
         # Project context embeddings to predictor dimension
         context_embeddings = self.context_proj(context_embeddings)  # (B, n_context, n_embd)
-        # Get position queries for target positions
-        # target_positions contains indices, so we gather from position_queries
+        
+        # Add positional embeddings to context if positions are provided
+        if context_positions is not None:
+            context_pos_emb = self.context_pos_embedding.expand(B, -1, -1)  # (B, max_chunks, n_embd)
+            # Gather positional embeddings for context positions
+            context_embeddings = context_embeddings + torch.gather(
+                context_pos_emb, 1, 
+                context_positions.unsqueeze(-1).expand(-1, -1, self.n_embd)
+            )
+        
+        # Get position queries for target positions with positional embeddings
         queries = self.position_queries.expand(B, -1, -1)  # (B, max_chunks, n_embd)
+        target_pos_emb = self.target_pos_embedding.expand(B, -1, -1)  # (B, max_chunks, n_embd)
+        
+        # Gather both position queries and positional embeddings for target positions
         target_queries = torch.gather(queries, 1,
                                      target_positions.unsqueeze(-1).expand(-1, -1, self.n_embd))  # (B, n_target, n_embd)
-        x = target_queries
+        target_pos = torch.gather(target_pos_emb, 1,
+                                 target_positions.unsqueeze(-1).expand(-1, -1, self.n_embd))  # (B, n_target, n_embd)
+        
+        # Combine position queries with positional embeddings
+        x = target_queries + target_pos
+        
         for block in self.blocks:
             x = block(x, context_embeddings)
         x = self.output_proj(norm(x))
