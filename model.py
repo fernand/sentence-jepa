@@ -72,11 +72,31 @@ class ChunkedSelfAttention(nn.Module):
         self.c_attn = nn.Linear(self.n_embd, 3 * self.n_embd, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
         self.rotary = ChunkedRotary(self.head_dim, self.chunk_size,)
+        # Pre-create the block mask to avoid recomputation
+        # We'll create it lazily on first forward pass since we need device info
+        self.block_mask = None
+        self.cached_seq_len = None
 
     def forward(self, x):
         B, T, C = x.size()
         chunk_size = self.chunk_size
-        # Compute Q, K, V
+        if self.block_mask is None or self.cached_seq_len != T:
+            def make_chunk_mask(b, h, q_idx, kv_idx):
+                # Each position can only attend within its chunk
+                q_chunk = q_idx // chunk_size
+                kv_chunk = kv_idx // chunk_size
+                return q_chunk == kv_chunk
+
+            self.block_mask = create_block_mask(
+                make_chunk_mask,
+                B=1,  # Create for batch size 1, will be broadcasted
+                H=1,  # Create for 1 head, will be broadcasted
+                Q_LEN=T,
+                KV_LEN=T,
+                device=x.device,
+                _compile=True
+            )
+            self.cached_seq_len = T
         qkv = self.c_attn(x)
         q, k, v = qkv.split(self.n_embd, dim=2)
         # Reshape for multi-head attention
@@ -91,22 +111,7 @@ class ChunkedSelfAttention(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        def make_chunk_mask(b, h, q_idx, kv_idx):
-            # Each position can only attend within its chunk
-            q_chunk = q_idx // chunk_size
-            kv_chunk = kv_idx // chunk_size
-            return q_chunk == kv_chunk
-
-        block_mask = create_block_mask(
-            make_chunk_mask,
-            B=B,
-            H=self.n_head,
-            Q_LEN=T,
-            KV_LEN=T,
-            device=x.device,
-            _compile=True
-        )
-        y = flex_attention(q, k, v, block_mask=block_mask)
+        y = flex_attention(q, k, v, block_mask=self.block_mask)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.c_proj(y)
