@@ -87,7 +87,7 @@ def compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions,
     valid_mask = torch.arange(max_targets, device=device).unsqueeze(0) < n_masked_per_batch.unsqueeze(1)
     if valid_mask.any():
         # Compute L1 loss only on valid positions
-        loss = F.smooth_l1_loss(
+        loss = F.l1_loss(
             predicted_embeddings[valid_mask],
             gathered_targets[valid_mask],
             reduction='mean'
@@ -172,7 +172,7 @@ def main():
     parser = argparse.ArgumentParser(description='Train JEPA model')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size per GPU')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Base learning rate')
-    parser.add_argument('--weight_decay', type=float, default=0.3, help='Weight decay for AdamW optimizer')
+    parser.add_argument('--weight_decay', type=float, default=0.2, help='Weight decay for AdamW optimizer')
     parser.add_argument('--val_loss_every', type=int, default=250, help='Validation frequency')
     parser.add_argument('--project_name', type=str, default='sentence-jepa', help='Comet ML project name')
     parser.add_argument('--num_steps', type=int, default=None, help='Number of training steps')
@@ -240,7 +240,6 @@ def main():
         n_encoder_embd=n_embd
     )
 
-    # Initialize Comet ML experiment
     experiment = None
     if args.use_comet and rank == 0:
         try:
