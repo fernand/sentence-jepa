@@ -262,8 +262,6 @@ def main():
         )
         schedulers.append(scheduler)
 
-    # EMA decay for target encoder updates
-
     train_pattern = os.path.join(args.dataset_path, 'fineweb-edu_train_*.bin')
     val_pattern = os.path.join(args.dataset_path, 'fineweb-edu_val_*.bin')
     train_loader = DataLoader(
@@ -294,7 +292,6 @@ def main():
     for step in range(args.num_steps):
         batch_start_time = time.perf_counter()
         batch = train_loader.next_batch()
-
         # Apply warmup or cosine schedule
         if step < args.warmup_steps:
             # Linear warmup
