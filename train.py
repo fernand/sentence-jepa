@@ -83,7 +83,7 @@ def compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions,
     valid_mask = torch.arange(max_targets, device=device).unsqueeze(0) < n_masked_per_batch.unsqueeze(1)
     if valid_mask.any():
         # Compute L1 loss only on valid positions
-        loss = F.l1_loss(
+        loss = F.smooth_l1_loss(
             predicted_embeddings[valid_mask],
             gathered_targets[valid_mask],
             reduction='mean'
