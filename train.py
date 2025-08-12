@@ -147,7 +147,7 @@ def validate(chunk_encoder, context_encoder, target_encoder, predictor, val_load
 
 def main():
     parser = argparse.ArgumentParser(description='Train JEPA model')
-    parser.add_argument('--batch_size', type=int, default=16, help='Batch size per GPU')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size per GPU')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Base learning rate')
     parser.add_argument('--val_loss_every', type=int, default=250, help='Validation frequency')
     parser.add_argument('--project_name', type=str, default='sentence-jepa', help='Comet ML project name')
@@ -260,7 +260,6 @@ def main():
         scheduler = CosineAnnealingLR(
             optimizer,
             T_max=args.num_steps - args.warmup_steps,
-            eta_min=args.learning_rate * 0.1
         )
         schedulers.append(scheduler)
 
