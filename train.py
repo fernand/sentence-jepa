@@ -153,7 +153,7 @@ def main():
     parser.add_argument('--project_name', type=str, default='sentence-jepa', help='Comet ML project name')
     parser.add_argument('--num_steps', type=int, default=None, help='Number of training steps')
     parser.add_argument('--dataset_path', type=str, default='data/fineweb-edu_10B', help='Path to dataset')
-    parser.add_argument('--warmup_steps', type=int, default=1000, help='Number of warmup steps')
+    parser.add_argument('--warmup_steps', type=int, default=None, help='Number of warmup steps')
     parser.add_argument('--ema_decay', type=float, default=0.996, help='EMA decay rate')
     parser.add_argument('--mask_ratio', type=float, default=0.25, help='Chunk masking ratio')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
@@ -169,6 +169,8 @@ def main():
     if args.num_steps is None:
         tokens_per_step = seq_len * args.batch_size * world_size
         args.num_steps = 10_000_000_000 // tokens_per_step
+    if args.warmup_steps is None:
+        args.warmup_steps = int(0.03 * args.num_steps)
 
     if rank == 0:
         print(f'Training configuration:')
