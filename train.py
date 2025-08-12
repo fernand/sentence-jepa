@@ -198,7 +198,7 @@ def main():
 
     vocab_size = 65024  # Falcon tokenizer
     chunk_size = 32
-    n_chunks = seq_len // (chunk_size - 1)
+    n_chunks = seq_len // chunk_size
     n_embd = 768
 
     chunk_enc_config = ChunkEncoderConfig(

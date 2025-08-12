@@ -75,7 +75,7 @@ class DataLoader:
         self.n_chunks = n_chunks
         self.mask_ratio = mask_ratio
         self.device = torch.device(device) if isinstance(device, str) else device
-        
+
         # Calculate total tokens needed per sample
         # Each chunk needs (chunk_size - 1) tokens since CLS is added
         self.tokens_per_chunk = chunk_size - 1
@@ -114,15 +114,15 @@ class DataLoader:
         """
         B = self.B
         T = self.T
-        
+
         # Get tokens
         buf = self.tokens[self.current_position : self.current_position+B*T]
         buf = torch.tensor(buf.astype(np.int32), dtype=torch.long)
         tokens = buf.view(B, T).to(self.device)
-        
+
         # Create chunk mask
         chunk_mask = create_random_chunk_mask(B, self.n_chunks, self.mask_ratio, self.device)
-        
+
         # Get target positions (masked positions)
         target_positions_list = []
         max_targets = 0
@@ -130,17 +130,17 @@ class DataLoader:
             masked_pos = torch.where(chunk_mask[b])[0]
             target_positions_list.append(masked_pos)
             max_targets = max(max_targets, len(masked_pos))
-        
+
         # Pad target positions to same length
         target_positions = torch.zeros(B, max_targets, dtype=torch.long, device=self.device)
         for b, pos in enumerate(target_positions_list):
             target_positions[b, :len(pos)] = pos
-        
+
         # Advance position
         self.current_position += B * T
         if self.current_position + (B * T) > len(self.tokens):
             self.advance()
-        
+
         return {
             'tokens': tokens,
             'chunk_mask': chunk_mask,
