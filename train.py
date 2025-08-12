@@ -16,7 +16,7 @@ from model import (
 )
 
 def setup_distributed():
-    '''Initialize distributed training if available.'''
+    """Initialize distributed training if available."""
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         rank = int(os.environ['RANK'])
         world_size = int(os.environ['WORLD_SIZE'])
@@ -28,12 +28,12 @@ def setup_distributed():
         return 0, 1, 0, False
 
 def cleanup_distributed():
-    '''Clean up distributed training.'''
+    """Clean up distributed training."""
     if dist.is_initialized():
         dist.destroy_process_group()
 
 class EMA:
-    '''Exponential Moving Average for model parameters.'''
+    """Exponential Moving Average for model parameters."""
     def __init__(self, model, decay):
         self.model = model
         self.decay = decay
@@ -45,27 +45,27 @@ class EMA:
                 self.shadow[name] = param.data.clone()
 
     def update(self):
-        '''Update shadow parameters.'''
+        """Update shadow parameters."""
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 self.shadow[name] = self.decay * self.shadow[name] + (1 - self.decay) * param.data
 
     def apply_shadow(self):
-        '''Apply shadow parameters to model.'''
+        """Apply shadow parameters to model."""
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 self.backup[name] = param.data
                 param.data = self.shadow[name]
 
     def restore(self):
-        '''Restore original parameters.'''
+        """Restore original parameters."""
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 param.data = self.backup[name]
         self.backup = {}
 
 def compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions, chunk_mask):
-    '''
+    """
     Compute JEPA loss between predicted and target embeddings.
     Args:
         predicted_embeddings: (B, n_target, D) predicted embeddings
@@ -74,7 +74,7 @@ def compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions,
         chunk_mask: (B, n_chunks) boolean mask
     Returns:
         loss: scalar loss value
-    '''
+    """
     B = predicted_embeddings.shape[0]
     device = predicted_embeddings.device
     # Gather target embeddings for masked positions
@@ -287,13 +287,22 @@ def main():
     if rank == 0:
         print('\nStarting training...')
 
+    # Store initial learning rates
+    initial_lrs = []
+    for optimizer in optimizers:
+        initial_lrs.append([group['lr'] for group in optimizer.param_groups])
+
     for step in range(args.num_steps):
         batch = train_loader.next_batch()
+
+        # Apply warmup or cosine schedule
         if step < args.warmup_steps:
+            # Linear warmup
             lr_scale = (step + 1) / args.warmup_steps
-            for optimizer in optimizers:
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = param_group['lr'] * lr_scale
+            for opt_idx, optimizer in enumerate(optimizers):
+                for group_idx, param_group in enumerate(optimizer.param_groups):
+                    param_group['lr'] = initial_lrs[opt_idx][group_idx] * lr_scale
+
         loss = train_step(chunk_encoder, context_encoder, target_encoder, predictor, batch, optimizers)
 
         # Update EMA
@@ -315,7 +324,7 @@ def main():
         if step % args.val_loss_every == 0 and step > 0:
             val_loss = validate(
                 chunk_encoder, context_encoder, target_encoder, predictor,
-                val_loader, device, use_amp=True
+                val_loader
             )
 
             if rank == 0:
