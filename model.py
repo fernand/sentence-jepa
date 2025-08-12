@@ -8,43 +8,30 @@ import torch.nn.functional as F
 
 from muon import Muon
 
-class Rotary(torch.nn.Module):
-    def __init__(self, dim, base=10000):
+class Rotary(nn.Module):
+    def __init__(self, dim: int, max_seq_len: int):
         super().__init__()
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
-        self.register_buffer("inv_freq", inv_freq)
-        self.seq_len_cached = None
-        self.cos_cached = None
-        self.sin_cached = None
+        # half-truncate RoPE by @YouJiacheng (w/ base freq tuning)
+        angular_freq = (1 / 1024) ** torch.linspace(0, 1, steps=dim//4, dtype=torch.float32)
+        angular_freq = torch.cat([angular_freq, angular_freq.new_zeros(dim//4)])
+        t = torch.arange(max_seq_len, dtype=torch.float32)
+        theta = torch.einsum("i,j -> ij", t, angular_freq)
+        self.cos = nn.Buffer(theta.cos(), persistent=False)
+        self.sin = nn.Buffer(theta.sin(), persistent=False)
 
-    def forward(self, x, chunk_size=None):
-        seq_len = x.shape[1]
-        # If chunk_size is provided, create position indices that reset per chunk
-        if chunk_size is not None:
-            device = x.device
-            n_chunks = seq_len // chunk_size
-            # Create position indices that reset for each chunk (0, 1, ..., chunk_size-1, 0, 1, ...)
-            t = torch.arange(chunk_size, device=device).repeat(n_chunks).type_as(self.inv_freq)
-        else:
-            t = torch.arange(seq_len, device=x.device).type_as(self.inv_freq)
-        freqs = torch.outer(t, self.inv_freq).to(x.device)
-        cos = freqs.cos()
-        sin = freqs.sin()
-        return cos[None, :, None, :], sin[None, :, None, :]
+    def forward(self, x_BTHD: torch.Tensor):
+        print(x_BTHD.shape)
+        print(self.cos.size(0), x_BTHD.size(-3))
+        exit()
+        assert self.cos.size(0) >= x_BTHD.size(-3)
+        cos, sin = self.cos[None, :x_BTHD.size(-3), None, :], self.sin[None, :x_BTHD.size(-3), None, :]
+        x1, x2 = x_BTHD.to(dtype=torch.float32).chunk(2, dim=-1)
+        y1 = x1 * cos + x2 * sin
+        y2 = x1 * (-sin) + x2 * cos
+        return torch.cat((y1, y2), 3).type_as(x_BTHD)
 
-def apply_rotary_emb(x, cos, sin):
-    assert x.ndim == 4 # multihead attention
-    d = x.shape[3]//2
-    x1 = x[..., :d]
-    x2 = x[..., d:]
-    y1 = x1 * cos + x2 * sin
-    y2 = x1 * (-sin) + x2 * cos
-    return torch.cat([y1, y2], 3)
-
-def rmsnorm(x0, eps:float=1e-6):
-    x = x0.float()
-    x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
-    return x.type_as(x0)
+def norm(x: torch.Tensor):
+    return F.rms_norm(x, (x.size(-1),))
 
 class ChunkedSelfAttention(nn.Module):
     def __init__(self, config):
@@ -57,7 +44,7 @@ class ChunkedSelfAttention(nn.Module):
 
         self.c_attn = nn.Linear(self.n_embd, 3 * self.n_embd, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.rotary = Rotary(self.head_dim)
+        self.rotary = Rotary(self.head_dim, self.chunk_size)
 
     def forward(self, x):
         B, T, C = x.size()
@@ -73,9 +60,8 @@ class ChunkedSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, self.head_dim)
 
         # Apply rotary embeddings (with positions resetting per chunk)
-        cos, sin = self.rotary(q, chunk_size=chunk_size)
-        q = apply_rotary_emb(q, cos, sin)
-        k = apply_rotary_emb(k, cos, sin)
+        q, k = norm(q), norm(k)
+        q, k = self.rotary(q), self.rotary(k)
 
         # Transpose for attention: (B, n_head, T, head_dim)
         q = q.transpose(1, 2)
@@ -112,7 +98,7 @@ class SelfAttention(nn.Module):
         assert self.n_embd % self.n_head == 0
         self.c_attn = nn.Linear(self.n_embd, 3 * self.n_embd, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.rotary = Rotary(self.head_dim)
+        self.rotary = Rotary(self.head_dim, config.max_chunks)
 
     def forward(self, x):
         B, T, C = x.size()
@@ -121,9 +107,8 @@ class SelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, self.head_dim)
         q = q.view(B, T, self.n_head, self.head_dim)
         v = v.view(B, T, self.n_head, self.head_dim)
-        cos, sin = self.rotary(q)
-        q = apply_rotary_emb(q, cos, sin)
-        k = apply_rotary_emb(k, cos, sin)
+        q, k = norm(q), norm(k)
+        q, k = self.rotary(q), self.rotary(k)
         y = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=False)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.c_proj(y)
@@ -139,7 +124,7 @@ class CrossAttention(nn.Module):
         self.c_q = nn.Linear(self.n_embd, self.n_embd, bias=False)
         self.c_kv = nn.Linear(self.n_embd, 2 * self.n_embd, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.rotary = Rotary(self.head_dim)
+        self.rotary = Rotary(self.head_dim, config.max_chunks)
 
     def forward(self, queries, context):
         """
@@ -162,10 +147,8 @@ class CrossAttention(nn.Module):
         v = v.view(B, T_c, self.n_head, self.head_dim)
 
         # Apply rotary embeddings
-        cos_q, sin_q = self.rotary(q)
-        cos_k, sin_k = self.rotary(k)
-        q = apply_rotary_emb(q, cos_q, sin_q)
-        k = apply_rotary_emb(k, cos_k, sin_k)
+        q, k = norm(q), norm(k)
+        q, k = self.rotary(q), self.rotary(k)
 
         # Compute attention
         y = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=False)
@@ -193,8 +176,8 @@ class Block(nn.Module):
         self.attn_scale = (1 / math.sqrt(2 * config.n_layer))
 
     def forward(self, x):
-        x = x + self.attn_scale * self.attn(rmsnorm(x))
-        x = x + self.mlp(rmsnorm(x))
+        x = x + self.attn_scale * self.attn(norm(x))
+        x = x + self.mlp(norm(x))
         return x
 
 class PredictorBlock(nn.Module):
@@ -207,11 +190,11 @@ class PredictorBlock(nn.Module):
 
     def forward(self, x, context):
         # Self-attention among predictions
-        x = x + self.attn_scale * self.self_attn(rmsnorm(x))
+        x = x + self.attn_scale * self.self_attn(norm(x))
         # Cross-attention to context
-        x = x + self.attn_scale * self.cross_attn(rmsnorm(x), context)
+        x = x + self.attn_scale * self.cross_attn(norm(x), context)
         # MLP
-        x = x + self.mlp(rmsnorm(x))
+        x = x + self.mlp(norm(x))
         return x
 
 @dataclass
@@ -262,7 +245,7 @@ class ChunkEncoder(nn.Module):
         x = x.view(B, n_chunks * chunk_size, self.config.n_embd)
         for block in self.transformer:
             x = block(x)
-        x = rmsnorm(x)
+        x = norm(x)
 
         # Reshape to chunks and extract CLS tokens
         x = x.view(B, n_chunks, chunk_size, self.config.n_embd)
@@ -313,7 +296,7 @@ class Encoder(nn.Module):
             x = torch.where(chunk_mask_expanded, mask_emb, x)
         for block in self.blocks:
             x = block(x)
-        x = rmsnorm(x)
+        x = norm(x)
         return x
 
     def configure_optimizers(self, adam_lr):
@@ -362,7 +345,7 @@ class Predictor(nn.Module):
         x = target_queries
         for block in self.blocks:
             x = block(x, context_embeddings)
-        x = self.output_proj(rmsnorm(x))
+        x = self.output_proj(norm(x))
         return x
 
     def configure_optimizers(self, adam_lr):
