@@ -162,7 +162,7 @@ def main():
     parser.add_argument('--dataset_path', type=str, default='data/fineweb-edu_10B', help='Path to dataset')
     parser.add_argument('--warmup_steps', type=int, default=None, help='Number of warmup steps')
     parser.add_argument('--ema_decay', type=float, default=0.996, help='EMA decay rate')
-    parser.add_argument('--mask_ratio', type=float, default=0.25, help='Chunk masking ratio')
+    parser.add_argument('--mask_ratio', type=float, default=0.50, help='Chunk masking ratio')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--compile', action='store_true', help='Use torch.compile')
     parser.add_argument('--use_comet', action='store_true', help='Use Comet ML for logging')
