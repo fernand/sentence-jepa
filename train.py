@@ -119,7 +119,7 @@ def train_step(
         # The predictor should only attend to visible chunks, not masked ones
         B, n_chunks, D = context_embeddings.shape
         visible_mask = ~chunk_mask  # True for visible positions
-        
+
         # Gather visible chunks for each batch element
         context_for_predictor = []
         for b in range(B):
@@ -129,13 +129,13 @@ def train_step(
             else:
                 # Edge case: all chunks masked (shouldn't happen with proper masking)
                 context_for_predictor.append(context_embeddings[b, :1])  # Use first chunk as fallback
-        
+
         # Stack with padding to max visible chunks
         max_visible = max(ctx.shape[0] for ctx in context_for_predictor)
         padded_context = torch.zeros(B, max_visible, D, device=context_embeddings.device, dtype=context_embeddings.dtype)
         for b, ctx in enumerate(context_for_predictor):
             padded_context[b, :ctx.shape[0]] = ctx
-        
+
         # 5. Predict masked chunks
         predicted_embeddings = predictor(padded_context, target_positions)
         # 6. Compute loss
@@ -161,12 +161,12 @@ def validate(chunk_encoder, context_encoder, target_encoder, predictor, val_load
                 chunk_embeddings = chunk_encoder(batch['tokens'])
                 context_embeddings = context_encoder(chunk_embeddings, batch['chunk_mask'])
                 target_embeddings = target_encoder(chunk_embeddings, chunk_mask=None)
-                
+
                 # Extract only visible context chunks for predictor
                 B, n_chunks, D = context_embeddings.shape
                 chunk_mask = batch['chunk_mask']
                 visible_mask = ~chunk_mask
-                
+
                 # Gather visible chunks for each batch element
                 context_for_predictor = []
                 for b in range(B):
@@ -175,13 +175,13 @@ def validate(chunk_encoder, context_encoder, target_encoder, predictor, val_load
                         context_for_predictor.append(context_embeddings[b, visible_indices])
                     else:
                         context_for_predictor.append(context_embeddings[b, :1])
-                
+
                 # Stack with padding to max visible chunks
                 max_visible = max(ctx.shape[0] for ctx in context_for_predictor)
                 padded_context = torch.zeros(B, max_visible, D, device=context_embeddings.device, dtype=context_embeddings.dtype)
                 for b, ctx in enumerate(context_for_predictor):
                     padded_context[b, :ctx.shape[0]] = ctx
-                
+
                 predicted_embeddings = predictor(padded_context, batch['target_positions'])
                 loss = compute_jepa_loss(
                     predicted_embeddings, target_embeddings,
@@ -371,7 +371,7 @@ def main():
 
         if rank == 0 and step % 10 == 0:
             current_lr = optimizers[0].param_groups[0]['lr']
-            print(f'Step {step}/{args.num_steps} | Loss: {loss:.4f} | LR: {current_lr:.6f} | Time: {batch_time*1e3:.f}ms')
+            print(f'Step {step}/{args.num_steps} | Loss: {loss:.4f} | LR: {current_lr:.6f} | Time: {batch_time*1e3:.0f}ms')
 
             if experiment:
                 experiment.log_metric('train_loss', loss, step=step)
