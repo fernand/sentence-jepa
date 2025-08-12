@@ -316,6 +316,10 @@ class Encoder(nn.Module):
         x = rmsnorm(x)
         return x
 
+    def configure_optimizers(self, adam_lr):
+        """Configure Muon optimizer with 10x the base learning rate."""
+        return Muon(self.parameters(), lr=10*adam_lr, weight_decay=0.1, momentum=0.95)
+
 
 @dataclass
 class PredictorConfig:
@@ -331,6 +335,8 @@ class Predictor(nn.Module):
         super().__init__()
         self.config = config
         self.n_embd = config.n_embd
+        self.n_encoder_embd = config.n_encoder_embd
+        self.context_proj = nn.Linear(config.n_encoder_embd, config.n_embd, bias=False)
         self.position_queries = nn.Parameter(torch.randn(1, config.max_chunks, config.n_embd))
         self.blocks = nn.ModuleList([PredictorBlock(config) for _ in range(config.n_layer)])
         self.output_proj = nn.Linear(config.n_embd, config.n_encoder_embd, bias=False)
@@ -338,20 +344,27 @@ class Predictor(nn.Module):
     def forward(self, context_embeddings: torch.Tensor, target_positions: torch.LongTensor):
         """
         Args:
-            context_embeddings: Tensor of shape (B, n_context, n_embd) - visible chunk embeddings
+            context_embeddings: Tensor of shape (B, n_context, n_encoder_embd) - visible chunk embeddings
             target_positions: Tensor of shape (B, n_target) - positions of chunks to predict
 
         Returns:
-            Tensor of shape (B, n_target, n_embd) - predicted embeddings for masked positions
+            Tensor of shape (B, n_target, n_encoder_embd) - predicted embeddings for masked positions
         """
-        B, n_context, D = context_embeddings.shape
+        B, n_context, D_enc = context_embeddings.shape
+        n_target = target_positions.shape[1]
+        # Project context embeddings to predictor dimension
+        context_embeddings = self.context_proj(context_embeddings)  # (B, n_context, n_embd)
         # Get position queries for target positions
         # target_positions contains indices, so we gather from position_queries
         queries = self.position_queries.expand(B, -1, -1)  # (B, max_chunks, n_embd)
         target_queries = torch.gather(queries, 1,
-                                     target_positions.unsqueeze(-1).expand(-1, -1, D))  # (B, n_target, n_embd)
+                                     target_positions.unsqueeze(-1).expand(-1, -1, self.n_embd))  # (B, n_target, n_embd)
         x = target_queries
         for block in self.blocks:
             x = block(x, context_embeddings)
         x = self.output_proj(rmsnorm(x))
         return x
+
+    def configure_optimizers(self, adam_lr):
+        """Configure Muon optimizer with 10x the base learning rate."""
+        return Muon(self.parameters(), lr=10*adam_lr, weight_decay=0.1, momentum=0.95)
