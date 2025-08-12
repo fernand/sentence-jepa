@@ -30,6 +30,35 @@ def _load_data_shard(filename):
     assert len(tokens) == ntok, "number of tokens read does not match header?"
     return tokens
 
+def create_random_chunk_mask(batch_size: int, n_chunks: int, mask_ratio: float = 0.15,
+                             device: torch.device = None) -> torch.BoolTensor:
+    """
+    Create random chunk masks for JEPA training.
+
+    Args:
+        batch_size: Number of samples in batch
+        n_chunks: Number of chunks per sample
+        mask_ratio: Fraction of chunks to mask (default 0.15)
+        device: Device to create tensor on
+
+    Returns:
+        Boolean mask of shape (batch_size, n_chunks) where True = masked
+    """
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    mask = torch.rand(batch_size, n_chunks, device=device) < mask_ratio
+    # Ensure at least one chunk is visible and one is masked per sample (if possible)
+    for i in range(batch_size):
+        if mask[i].all() and n_chunks > 1:  # All masked, unmask one
+            unmask_idx = torch.randint(0, n_chunks, (1,), device=device)
+            mask[i, unmask_idx] = False
+        elif not mask[i].any() and n_chunks > 1:  # None masked, mask one
+            mask_idx = torch.randint(0, n_chunks, (1,), device=device)
+            mask[i, mask_idx] = True
+
+    return mask
+
+
 class DataLoader:
     def __init__(self, filename_pattern, B, T):
         self.B = B

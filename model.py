@@ -103,6 +103,76 @@ class ChunkedSelfAttention(nn.Module):
         y = self.c_proj(y)
         return y
 
+class SelfAttention(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.head_dim = self.n_embd // self.n_head
+        assert self.n_embd % self.n_head == 0
+        self.c_attn = nn.Linear(self.n_embd, 3 * self.n_embd, bias=False)
+        self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.rotary = Rotary(self.head_dim)
+
+    def forward(self, x):
+        B, T, C = x.size()
+        qkv = self.c_attn(x)
+        q, k, v = qkv.split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_head, self.head_dim)
+        q = q.view(B, T, self.n_head, self.head_dim)
+        v = v.view(B, T, self.n_head, self.head_dim)
+        cos, sin = self.rotary(q)
+        q = apply_rotary_emb(q, cos, sin)
+        k = apply_rotary_emb(k, cos, sin)
+        y = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=False)
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        y = self.c_proj(y)
+        return y
+
+class CrossAttention(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.head_dim = self.n_embd // self.n_head
+        assert self.n_embd % self.n_head == 0
+        self.c_q = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.c_kv = nn.Linear(self.n_embd, 2 * self.n_embd, bias=False)
+        self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.rotary = Rotary(self.head_dim)
+
+    def forward(self, queries, context):
+        """
+        Args:
+            queries: Tensor of shape (B, T_q, C) - positions to predict
+            context: Tensor of shape (B, T_c, C) - context chunks
+        Returns:
+            Tensor of shape (B, T_q, C)
+        """
+        B, T_q, C = queries.size()
+        _, T_c, _ = context.size()
+
+        # Compute queries from prediction positions
+        q = self.c_q(queries).view(B, T_q, self.n_head, self.head_dim)
+
+        # Compute keys and values from context
+        kv = self.c_kv(context)
+        k, v = kv.split(self.n_embd, dim=2)
+        k = k.view(B, T_c, self.n_head, self.head_dim)
+        v = v.view(B, T_c, self.n_head, self.head_dim)
+
+        # Apply rotary embeddings
+        cos_q, sin_q = self.rotary(q)
+        cos_k, sin_k = self.rotary(k)
+        q = apply_rotary_emb(q, cos_q, sin_q)
+        k = apply_rotary_emb(k, cos_k, sin_k)
+
+        # Compute attention
+        y = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=False)
+        y = y.transpose(1, 2).contiguous().view(B, T_q, C)
+        y = self.c_proj(y)
+        return y
+
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -116,9 +186,9 @@ class MLP(nn.Module):
         return x
 
 class Block(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, chunked: bool = False):
         super().__init__()
-        self.attn = ChunkedSelfAttention(config)
+        self.attn = ChunkedSelfAttention(config) if chunked else SelfAttention(config)
         self.mlp = MLP(config)
         self.attn_scale = (1 / math.sqrt(2 * config.n_layer))
 
@@ -127,20 +197,38 @@ class Block(nn.Module):
         x = x + self.mlp(rmsnorm(x))
         return x
 
+class PredictorBlock(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.self_attn = SelfAttention(config)
+        self.cross_attn = CrossAttention(config)
+        self.mlp = MLP(config)
+        self.attn_scale = (1 / math.sqrt(2 * config.n_layer))
+
+    def forward(self, x, context):
+        # Self-attention among predictions
+        x = x + self.attn_scale * self.self_attn(rmsnorm(x))
+        # Cross-attention to context
+        x = x + self.attn_scale * self.cross_attn(rmsnorm(x), context)
+        # MLP
+        x = x + self.mlp(rmsnorm(x))
+        return x
+
 @dataclass
-class EncoderConfig:
+class ChunkEncoderConfig:
     vocab_size: int
     chunk_size: int
-    n_layer: int = 12
+    n_layer: int = 6
     n_head: int = 12
     n_embd: int = 768
 
-class Encoder(nn.Module):
+class ChunkEncoder(nn.Module):
+    """Encodes token sequences into chunk-level embeddings."""
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
-        self.transformer = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+        self.transformer = nn.ModuleList([Block(config, chunked=True) for _ in range(config.n_layer)])
         self.cls_token = nn.Parameter(torch.randn(1, 1, config.n_embd))
         self.cls_pos_embedding = nn.Parameter(torch.zeros(1, 1, config.n_embd))
 
@@ -166,6 +254,7 @@ class Encoder(nn.Module):
         x = self.wte(idx)  # (B, k*(chunk_size-1), n_embd)
         # Reshape to separate chunks
         x = x.view(B, n_chunks, tokens_per_chunk, self.config.n_embd)
+
         # Prepare CLS tokens for each chunk
         cls_tokens = self.cls_token.expand(B, n_chunks, 1, self.config.n_embd)
         cls_tokens = cls_tokens + self.cls_pos_embedding
@@ -188,5 +277,81 @@ class Encoder(nn.Module):
         ]
 
 @dataclass
+class EncoderConfig:
+    max_chunks: int = 32
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+
+class Encoder(nn.Module):
+    """Processes chunk embeddings (with optional masking) to produce contextual representations."""
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.n_embd = config.n_embd
+        self.chunk_pos_embedding = nn.Parameter(torch.zeros(1, config.max_chunks, config.n_embd))
+        self.mask_embedding = nn.Parameter(torch.randn(1, 1, config.n_embd))
+        self.blocks = nn.ModuleList([Block(config, chunked=False) for _ in range(config.n_layer)])
+
+    def forward(self, chunk_embeddings: torch.Tensor, chunk_mask: torch.BoolTensor = None):
+        """
+        Args:
+            chunk_embeddings: Tensor of shape (B, k, n_embd) containing chunk embeddings
+            chunk_mask: Optional boolean mask of shape (B, k) where True indicates
+                       a chunk should be masked. Default None (no masking).
+        Returns:
+            Tensor of shape (B, k, n_embd) containing contextualized chunk representations
+        """
+        B, k, D = chunk_embeddings.shape
+        x = chunk_embeddings + self.chunk_pos_embedding[:, :k, :]
+        if chunk_mask is not None:
+            assert chunk_mask.shape == (B, k), \
+                f"chunk_mask shape {chunk_mask.shape} doesn't match expected ({B}, {k})"
+            # Replace masked positions with mask embedding
+            mask_emb = self.mask_embedding.expand(B, k, D)
+            chunk_mask_expanded = chunk_mask.unsqueeze(-1).expand(-1, -1, D)
+            x = torch.where(chunk_mask_expanded, mask_emb, x)
+        for block in self.blocks:
+            x = block(x)
+        x = rmsnorm(x)
+        return x
+
+
+@dataclass
 class PredictorConfig:
-    pass
+    max_chunks: int = 32
+    n_layer: int = 6
+    n_head: int = 6
+    n_embd: int = 384
+    n_encoder_embd: int = 768
+
+class Predictor(nn.Module):
+    """Predicts masked chunk representations from context chunks."""
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.n_embd = config.n_embd
+        self.position_queries = nn.Parameter(torch.randn(1, config.max_chunks, config.n_embd))
+        self.blocks = nn.ModuleList([PredictorBlock(config) for _ in range(config.n_layer)])
+        self.output_proj = nn.Linear(config.n_embd, config.n_encoder_embd, bias=False)
+
+    def forward(self, context_embeddings: torch.Tensor, target_positions: torch.LongTensor):
+        """
+        Args:
+            context_embeddings: Tensor of shape (B, n_context, n_embd) - visible chunk embeddings
+            target_positions: Tensor of shape (B, n_target) - positions of chunks to predict
+
+        Returns:
+            Tensor of shape (B, n_target, n_embd) - predicted embeddings for masked positions
+        """
+        B, n_context, D = context_embeddings.shape
+        # Get position queries for target positions
+        # target_positions contains indices, so we gather from position_queries
+        queries = self.position_queries.expand(B, -1, -1)  # (B, max_chunks, n_embd)
+        target_queries = torch.gather(queries, 1,
+                                     target_positions.unsqueeze(-1).expand(-1, -1, D))  # (B, n_target, n_embd)
+        x = target_queries
+        for block in self.blocks:
+            x = block(x, context_embeddings)
+        x = self.output_proj(rmsnorm(x))
+        return x
