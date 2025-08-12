@@ -238,7 +238,7 @@ class Encoder(nn.Module):
         self.chunk_pos_embedding.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
         self.blocks = nn.ModuleList([Block(config, chunked=False) for _ in range(config.n_layer)])
 
-    def forward(self, chunk_embeddings: torch.Tensor, chunk_positions: torch.LongTensor = None):
+    def forward(self, chunk_embeddings: torch.Tensor, chunk_positions: torch.LongTensor):
         """
         Args:
             chunk_embeddings: Tensor of shape (B, k, n_embd) containing chunk embeddings
@@ -248,15 +248,11 @@ class Encoder(nn.Module):
         """
         B, k, D = chunk_embeddings.shape
 
-        if chunk_positions is not None:
-            # Use provided positions to gather positional embeddings
-            pos_embeddings = self.chunk_pos_embedding.expand(B, -1, -1)  # (B, max_chunks, n_embd)
-            # Gather positional embeddings for the specified positions
-            x = chunk_embeddings + torch.gather(pos_embeddings, 1,
-                                               chunk_positions.unsqueeze(-1).expand(-1, -1, D))
-        else:
-            # Fall back to sequential positions
-            x = chunk_embeddings + self.chunk_pos_embedding[:, :k, :]
+        # Use provided positions to gather positional embeddings
+        pos_embeddings = self.chunk_pos_embedding.expand(B, -1, -1)  # (B, max_chunks, n_embd)
+        # Gather positional embeddings for the specified positions
+        x = chunk_embeddings + torch.gather(pos_embeddings, 1,
+                                            chunk_positions.unsqueeze(-1).expand(-1, -1, D))
 
         for block in self.blocks:
             x = block(x)
