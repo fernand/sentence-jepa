@@ -247,13 +247,11 @@ class Encoder(nn.Module):
             Tensor of shape (B, k, n_embd) containing contextualized chunk representations
         """
         B, k, D = chunk_embeddings.shape
-
         # Use provided positions to gather positional embeddings
         pos_embeddings = self.chunk_pos_embedding.expand(B, -1, -1)  # (B, max_chunks, n_embd)
         # Gather positional embeddings for the specified positions
         x = chunk_embeddings + torch.gather(pos_embeddings, 1,
                                             chunk_positions.unsqueeze(-1).expand(-1, -1, D))
-
         for block in self.blocks:
             x = block(x)
         x = norm(x)
@@ -261,7 +259,6 @@ class Encoder(nn.Module):
 
     def configure_optimizers(self, wd, adam_lr, adam_betas):
         return torch.optim.AdamW(self.parameters(), lr=adam_lr, weight_decay=wd, betas=adam_betas)
-
 
 @dataclass
 class PredictorConfig:

@@ -46,21 +46,21 @@ def create_random_chunk_mask(batch_size: int, n_chunks: int, mask_ratio: float =
     """
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
+
     # Create base mask
     mask = torch.rand(batch_size, n_chunks, device=device) < mask_ratio
-    
+
     # Vectorized correction to ensure at least one visible and one masked
     if n_chunks > 1:
         # Find samples that need correction
         all_masked = mask.all(dim=1)
         none_masked = ~mask.any(dim=1)
-        
+
         # Fix all-masked samples (unmask one random position)
         if all_masked.any():
             unmask_indices = torch.randint(0, n_chunks, (all_masked.sum(),), device=device)
             mask[all_masked, unmask_indices] = False
-        
+
         # Fix none-masked samples (mask one random position)
         if none_masked.any():
             mask_indices = torch.randint(0, n_chunks, (none_masked.sum(),), device=device)
@@ -101,10 +101,10 @@ class DataLoader:
         self.ntok_total = ntok_total
         print(f"DataLoader: total number of tokens: {ntok_total:,} across {len(self.files)} files")
         print(f"DataLoader: chunk_size={chunk_size}, n_chunks={n_chunks}, tokens_per_sample={self.T}")
-        
+
         # Pre-allocate CPU staging buffer for efficient GPU transfer
         self.cpu_staging_buffer = torch.empty(B * self.T, dtype=torch.long, pin_memory=True)
-        
+
         self.reset()
 
     def reset(self):
@@ -131,10 +131,10 @@ class DataLoader:
 
         # Get tokens from current position
         buf = self.tokens[self.current_position : self.current_position+B*T]
-        
+
         # Use pre-allocated CPU buffer with pinned memory for faster GPU transfer
         self.cpu_staging_buffer[:len(buf)] = torch.from_numpy(buf.astype(np.int32))
-        
+
         # Efficient GPU transfer with non-blocking
         tokens = self.cpu_staging_buffer[:len(buf)].to(self.device, non_blocking=True)
         tokens = tokens.view(B, T)
@@ -145,7 +145,7 @@ class DataLoader:
         # Optimized target position extraction
         n_masked_per_batch = chunk_mask.sum(dim=1)
         max_targets = n_masked_per_batch.max().item()
-        
+
         # Pre-allocate and fill target positions efficiently
         target_positions = torch.zeros(B, max_targets, dtype=torch.long, device=self.device)
         for b in range(B):
