@@ -9,8 +9,10 @@ import torch.nn.functional as F
 from muon import Muon
 
 class Rotary(nn.Module):
-    def __init__(self, dim: int, max_seq_len: int):
+    def __init__(self, dim: int, max_seq_len: int, chunked: bool = False):
         super().__init__()
+        self.chunked = chunked
+        self.chunk_size = max_seq_len if chunked else None
         # half-truncate RoPE by @YouJiacheng (w/ base freq tuning)
         angular_freq = (1 / 1024) ** torch.linspace(0, 1, steps=dim//4, dtype=torch.float32)
         angular_freq = torch.cat([angular_freq, angular_freq.new_zeros(dim//4)])
@@ -20,8 +22,21 @@ class Rotary(nn.Module):
         self.sin = nn.Buffer(theta.sin(), persistent=False)
 
     def forward(self, x_BTHD: torch.Tensor):
-        assert self.cos.size(0) >= x_BTHD.size(-3)
-        cos, sin = self.cos[None, :x_BTHD.size(-3), None, :], self.sin[None, :x_BTHD.size(-3), None, :]
+        B, T, H, D = x_BTHD.shape
+        if self.chunked:
+            # For chunked mode, repeat the same positional encoding for each chunk
+            assert T % self.chunk_size == 0, f"Sequence length {T} must be divisible by chunk_size {self.chunk_size}"
+            n_chunks = T // self.chunk_size
+            # Get positional encodings for one chunk
+            cos_chunk = self.cos[None, :self.chunk_size, None, :]  # (1, chunk_size, 1, D)
+            sin_chunk = self.sin[None, :self.chunk_size, None, :]  # (1, chunk_size, 1, D)
+            # Repeat for all chunks
+            cos = cos_chunk.repeat(1, n_chunks, 1, 1)  # (1, T, 1, D)
+            sin = sin_chunk.repeat(1, n_chunks, 1, 1)  # (1, T, 1, D)
+        else:
+            assert self.cos.size(0) >= T
+            cos = self.cos[None, :T, None, :]
+            sin = self.sin[None, :T, None, :]
         x1, x2 = x_BTHD.to(dtype=torch.float32).chunk(2, dim=-1)
         y1 = x1 * cos + x2 * sin
         y2 = x1 * (-sin) + x2 * cos
@@ -41,25 +56,21 @@ class ChunkedSelfAttention(nn.Module):
 
         self.c_attn = nn.Linear(self.n_embd, 3 * self.n_embd, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.rotary = Rotary(self.head_dim, self.chunk_size)
+        self.rotary = Rotary(self.head_dim, self.chunk_size, chunked=True)
 
     def forward(self, x):
         B, T, C = x.size()
         chunk_size = self.chunk_size
-
         # Compute Q, K, V
         qkv = self.c_attn(x)
         q, k, v = qkv.split(self.n_embd, dim=2)
-
         # Reshape for multi-head attention
         k = k.view(B, T, self.n_head, self.head_dim)
         q = q.view(B, T, self.n_head, self.head_dim)
         v = v.view(B, T, self.n_head, self.head_dim)
-
         # Apply rotary embeddings (with positions resetting per chunk)
         q, k = norm(q), norm(k)
         q, k = self.rotary(q), self.rotary(k)
-
         # Transpose for attention: (B, n_head, T, head_dim)
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
@@ -133,20 +144,16 @@ class CrossAttention(nn.Module):
         """
         B, T_q, C = queries.size()
         _, T_c, _ = context.size()
-
         # Compute queries from prediction positions
         q = self.c_q(queries).view(B, T_q, self.n_head, self.head_dim)
-
         # Compute keys and values from context
         kv = self.c_kv(context)
         k, v = kv.split(self.n_embd, dim=2)
         k = k.view(B, T_c, self.n_head, self.head_dim)
         v = v.view(B, T_c, self.n_head, self.head_dim)
-
         # Apply rotary embeddings
         q, k = norm(q), norm(k)
         q, k = self.rotary(q), self.rotary(k)
-
         # Compute attention
         y = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=False)
         y = y.transpose(1, 2).contiguous().view(B, T_q, C)
