@@ -107,7 +107,10 @@ def train_step(
         context_embeddings = context_encoder(visible_chunks, visible_positions)
         # Target path processes ALL chunks (no masking, no gradients)
         with torch.no_grad():
-            target_embeddings = target_encoder(chunk_embeddings)
+            # Create positions for all chunks (0, 1, 2, ..., n_chunks-1)
+            all_positions = torch.arange(chunk_embeddings.shape[1], device=chunk_embeddings.device)
+            all_positions = all_positions.unsqueeze(0).expand(chunk_embeddings.shape[0], -1)
+            target_embeddings = target_encoder(chunk_embeddings, all_positions)
         # Predict masked chunks using context from visible chunks only
         predicted_embeddings = predictor(context_embeddings, target_positions, visible_positions)
         loss = compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions, chunk_mask)
@@ -133,8 +136,10 @@ def validate(chunk_encoder, context_encoder, target_encoder, predictor, val_load
             visible_chunks, visible_positions = extract_visible_chunks(chunk_embeddings, chunk_mask)
             # Context encoder processes ONLY visible chunks with their positions
             context_embeddings = context_encoder(visible_chunks, visible_positions)
-            # Target encoder processes ALL chunks
-            target_embeddings = target_encoder(chunk_embeddings)
+            # Target encoder processes ALL chunks with their positions
+            all_positions = torch.arange(chunk_embeddings.shape[1], device=chunk_embeddings.device)
+            all_positions = all_positions.unsqueeze(0).expand(chunk_embeddings.shape[0], -1)
+            target_embeddings = target_encoder(chunk_embeddings, all_positions)
             predicted_embeddings = predictor(context_embeddings, batch['target_positions'], visible_positions)
             loss = compute_jepa_loss(
                 predicted_embeddings, target_embeddings,
