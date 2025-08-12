@@ -75,22 +75,28 @@ def compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions,
     Returns:
         loss: scalar loss value
     """
-    B = predicted_embeddings.shape[0]
+    B, max_targets, D = predicted_embeddings.shape
     device = predicted_embeddings.device
-    # Gather target embeddings for masked positions
-    losses = []
-    for b in range(B):
-        # Find actual masked positions (non-padding in target_positions)
-        mask = chunk_mask[b]
-        n_masked = mask.sum().item()
-        if n_masked > 0:
-            positions = target_positions[b, :n_masked]
-            targets = target_embeddings[b, positions]
-            predictions = predicted_embeddings[b, :n_masked]
-            loss = F.l1_loss(predictions, targets)
-            losses.append(loss)
-    if losses:
-        return torch.stack(losses).mean()
+    
+    # Gather target embeddings for masked positions using advanced indexing
+    batch_indices = torch.arange(B, device=device).unsqueeze(1).expand(B, max_targets)
+    gathered_targets = target_embeddings[batch_indices, target_positions]
+    
+    # Create valid mask for non-padding positions
+    # Positions are padded with 0, but 0 could be a valid position
+    # So we check against the actual mask
+    n_masked_per_batch = chunk_mask.sum(dim=1)  # (B,)
+    position_indices = torch.arange(max_targets, device=device).unsqueeze(0).expand(B, max_targets)
+    valid_mask = position_indices < n_masked_per_batch.unsqueeze(1)
+    
+    if valid_mask.any():
+        # Compute L1 loss only on valid positions
+        loss = F.l1_loss(
+            predicted_embeddings[valid_mask],
+            gathered_targets[valid_mask],
+            reduction='mean'
+        )
+        return loss
     else:
         return torch.tensor(0.0, device=device)
 
@@ -105,12 +111,16 @@ def train_step(
         chunk_embeddings = chunk_encoder(tokens)
         # 2. Context path (with masking)
         context_embeddings = context_encoder(chunk_embeddings, chunk_mask)
-        # 3. Target path (no masking, no gradients)
+        # 3. Target path (no masking, no gradients) - target encoder sees ALL chunks
         with torch.no_grad():
             target_embeddings = target_encoder(chunk_embeddings, chunk_mask=None)
-        # 4. Predict masked chunks
-        predicted_embeddings = predictor(context_embeddings, target_positions)
-        # 5. Compute loss
+        # 4. Get only visible context chunks for predictor input
+        # Note: predictor should only receive non-masked context embeddings
+        visible_mask = ~chunk_mask  # Invert mask to get visible positions
+        context_for_predictor = context_embeddings  # Context encoder already applied masking
+        # 5. Predict masked chunks
+        predicted_embeddings = predictor(context_for_predictor, target_positions)
+        # 6. Compute loss
         loss = compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions, chunk_mask)
     loss.backward()
     for optimizer in optimizers:
@@ -263,7 +273,8 @@ def main():
         )
         schedulers.append(scheduler)
 
-    ema = EMA(target_encoder, decay=args.ema_decay)
+    # EMA should update target encoder based on context encoder
+    ema = EMA(context_encoder, decay=args.ema_decay)
 
     train_pattern = os.path.join(args.dataset_path, 'fineweb-edu_train_*.bin')
     val_pattern = os.path.join(args.dataset_path, 'fineweb-edu_val_*.bin')
@@ -305,8 +316,10 @@ def main():
 
         loss = train_step(chunk_encoder, context_encoder, target_encoder, predictor, batch, optimizers)
 
-        # Update EMA
-        ema.update()
+        # Update EMA - copy context encoder params to target encoder with momentum
+        with torch.no_grad():
+            for target_param, context_param in zip(target_encoder.parameters(), context_encoder.parameters()):
+                target_param.data.mul_(args.ema_decay).add_(context_param.data, alpha=1 - args.ema_decay)
 
         # Update learning rate schedulers (after warmup)
         if step >= args.warmup_steps:
