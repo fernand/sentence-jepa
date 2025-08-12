@@ -78,9 +78,9 @@ def train_step(
     with amp_context:
         # 1. Encode tokens to chunks
         chunk_embeddings = chunk_encoder(tokens)
-        # 2. Context path - should NOT use mask tokens!
-        # Using mask tokens allows information leakage through self-attention
-        context_embeddings = context_encoder(chunk_embeddings, chunk_mask=None)
+        # 2. Context path - MUST use mask to hide target chunks
+        # The mask prevents information leakage from target chunks to context
+        context_embeddings = context_encoder(chunk_embeddings, chunk_mask=chunk_mask)
         # 3. Target path (no masking, no gradients)
         with torch.no_grad():
             target_embeddings = target_encoder(chunk_embeddings, chunk_mask=None)
@@ -131,12 +131,12 @@ def validate(chunk_encoder, context_encoder, target_encoder, predictor, val_load
             batch = val_loader.next_batch()
             with amp_context:
                 chunk_embeddings = chunk_encoder(batch['tokens'])
-                context_embeddings = context_encoder(chunk_embeddings, chunk_mask=None)
+                chunk_mask = batch['chunk_mask']
+                context_embeddings = context_encoder(chunk_embeddings, chunk_mask=chunk_mask)
                 target_embeddings = target_encoder(chunk_embeddings, chunk_mask=None)
 
                 # Extract only visible context chunks for predictor
                 B, n_chunks, D = context_embeddings.shape
-                chunk_mask = batch['chunk_mask']
                 visible_mask = ~chunk_mask
 
                 # Efficient vectorized gathering of visible chunks
