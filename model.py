@@ -1,10 +1,36 @@
 import math
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 from torch import nn
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 import torch.nn.functional as F
+
+
+def get_1d_sincos_pos_embed(embed_dim, num_positions):
+    """
+    Generate 1D sinusoidal position embeddings.
+    Args:
+        embed_dim: output dimension for each position
+        num_positions: number of positions
+    Returns:
+        pos_embed: [num_positions, embed_dim] position embeddings
+    """
+    assert embed_dim % 2 == 0
+    omega = np.arange(embed_dim // 2, dtype=float)
+    omega /= embed_dim / 2.
+    omega = 1. / 10000**omega   # (D/2,)
+
+    pos = np.arange(num_positions, dtype=float)
+    out = np.einsum('m,d->md', pos, omega)   # (M, D/2), outer product
+
+    emb_sin = np.sin(out)  # (M, D/2)
+    emb_cos = np.cos(out)  # (M, D/2)
+
+    emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
+    return emb
+
 
 class ChunkedRotary(nn.Module):
     def __init__(self, dim: int, max_seq_len: int):
@@ -47,7 +73,7 @@ class ChunkedSelfAttention(nn.Module):
         assert self.n_embd % self.n_head == 0
         self.c_attn = nn.Linear(self.n_embd, 3 * self.n_embd, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.rotary = ChunkedRotary(self.head_dim, self.chunk_size, chunked=True)
+        self.rotary = ChunkedRotary(self.head_dim, self.chunk_size,)
 
     def forward(self, x):
         B, T, C = x.size()
@@ -112,41 +138,6 @@ class SelfAttention(nn.Module):
         y = self.c_proj(y)
         return y
 
-class CrossAttention(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.n_head = config.n_head
-        self.n_embd = config.n_embd
-        self.head_dim = self.n_embd // self.n_head
-        assert self.n_embd % self.n_head == 0
-        self.c_q = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        self.c_kv = nn.Linear(self.n_embd, 2 * self.n_embd, bias=False)
-        self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
-
-    def forward(self, queries, context):
-        """
-        Args:
-            queries: Tensor of shape (B, T_q, C) - positions to predict
-            context: Tensor of shape (B, T_c, C) - context chunks
-        Returns:
-            Tensor of shape (B, T_q, C)
-        """
-        B, T_q, C = queries.size()
-        _, T_c, _ = context.size()
-        # Compute queries from prediction positions
-        q = self.c_q(queries).view(B, T_q, self.n_head, self.head_dim)
-        # Compute keys and values from context
-        kv = self.c_kv(context)
-        k, v = kv.split(self.n_embd, dim=2)
-        k = k.view(B, T_c, self.n_head, self.head_dim)
-        v = v.view(B, T_c, self.n_head, self.head_dim)
-        # QK norm
-        q, k = norm(q), norm(k)
-        # Compute attention
-        y = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=False)
-        y = y.transpose(1, 2).contiguous().view(B, T_q, C)
-        y = self.c_proj(y)
-        return y
 
 class MLP(nn.Module):
     def __init__(self, config):
@@ -175,16 +166,13 @@ class Block(nn.Module):
 class PredictorBlock(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.self_attn = SelfAttention(config)
-        self.cross_attn = CrossAttention(config)
+        self.attn = SelfAttention(config)
         self.mlp = MLP(config)
         self.attn_scale = (1 / math.sqrt(2 * config.n_layer))
 
-    def forward(self, x, context):
-        # Self-attention among predictions
-        x = x + self.attn_scale * self.self_attn(norm(x))
-        # Cross-attention to context
-        x = x + self.attn_scale * self.cross_attn(norm(x), context)
+    def forward(self, x):
+        # Self-attention over both context and mask tokens
+        x = x + self.attn_scale * self.attn(norm(x))
         # MLP
         x = x + self.mlp(norm(x))
         return x
@@ -259,7 +247,12 @@ class Encoder(nn.Module):
         super().__init__()
         self.config = config
         self.n_embd = config.n_embd
-        self.chunk_pos_embedding = nn.Parameter(torch.zeros(1, config.max_chunks, config.n_embd))
+        # Use sinusoidal position embeddings (frozen, not learnable)
+        self.chunk_pos_embedding = nn.Parameter(torch.zeros(1, config.max_chunks, config.n_embd),
+                                               requires_grad=False)
+        # Initialize with sinusoidal embeddings
+        pos_embed = get_1d_sincos_pos_embed(config.n_embd, config.max_chunks)
+        self.chunk_pos_embedding.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
         self.blocks = nn.ModuleList([Block(config, chunked=False) for _ in range(config.n_layer)])
 
     def forward(self, chunk_embeddings: torch.Tensor, chunk_positions: torch.LongTensor = None):
@@ -271,17 +264,17 @@ class Encoder(nn.Module):
             Tensor of shape (B, k, n_embd) containing contextualized chunk representations
         """
         B, k, D = chunk_embeddings.shape
-        
+
         if chunk_positions is not None:
             # Use provided positions to gather positional embeddings
             pos_embeddings = self.chunk_pos_embedding.expand(B, -1, -1)  # (B, max_chunks, n_embd)
             # Gather positional embeddings for the specified positions
-            x = chunk_embeddings + torch.gather(pos_embeddings, 1, 
+            x = chunk_embeddings + torch.gather(pos_embeddings, 1,
                                                chunk_positions.unsqueeze(-1).expand(-1, -1, D))
         else:
             # Fall back to sequential positions (backward compatibility)
             x = chunk_embeddings + self.chunk_pos_embedding[:, :k, :]
-        
+
         for block in self.blocks:
             x = block(x)
         x = norm(x)
@@ -306,15 +299,23 @@ class Predictor(nn.Module):
         self.config = config
         self.n_embd = config.n_embd
         self.n_encoder_embd = config.n_encoder_embd
-        self.context_proj = nn.Linear(config.n_encoder_embd, config.n_embd, bias=False)
-        self.position_queries = nn.Parameter(torch.randn(1, config.max_chunks, config.n_embd))
-        self.target_pos_embedding = nn.Parameter(torch.zeros(1, config.max_chunks, config.n_embd))
-        self.context_pos_embedding = nn.Parameter(torch.zeros(1, config.max_chunks, config.n_embd))
+        self.context_proj = nn.Linear(config.n_encoder_embd, config.n_embd, bias=True)
+        # Mask token to be used for positions to predict
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, config.n_embd))
+        # Use sinusoidal position embeddings (frozen, not learnable)
+        self.predictor_pos_embed = nn.Parameter(torch.zeros(1, config.max_chunks, config.n_embd),
+                                               requires_grad=False)
+        # Initialize with sinusoidal embeddings
+        pos_embed = get_1d_sincos_pos_embed(config.n_embd, config.max_chunks)
+        self.predictor_pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
         self.blocks = nn.ModuleList([PredictorBlock(config) for _ in range(config.n_layer)])
-        self.output_proj = nn.Linear(config.n_embd, config.n_encoder_embd, bias=False)
+        self.predictor_norm = nn.LayerNorm(config.n_embd)
+        self.output_proj = nn.Linear(config.n_embd, config.n_encoder_embd, bias=True)
+        # Initialize mask token
+        nn.init.normal_(self.mask_token, std=0.02)
 
-    def forward(self, context_embeddings: torch.Tensor, target_positions: torch.LongTensor, 
-                context_positions: torch.LongTensor = None):
+    def forward(self, context_embeddings: torch.Tensor, target_positions: torch.LongTensor,
+                context_positions: torch.LongTensor):
         """
         Args:
             context_embeddings: Tensor of shape (B, n_context, n_encoder_embd) - visible chunk embeddings
@@ -326,34 +327,48 @@ class Predictor(nn.Module):
         """
         B, n_context, D_enc = context_embeddings.shape
         n_target = target_positions.shape[1]
+
         # Project context embeddings to predictor dimension
-        context_embeddings = self.context_proj(context_embeddings)  # (B, n_context, n_embd)
-        
-        # Add positional embeddings to context if positions are provided
-        if context_positions is not None:
-            context_pos_emb = self.context_pos_embedding.expand(B, -1, -1)  # (B, max_chunks, n_embd)
-            # Gather positional embeddings for context positions
-            context_embeddings = context_embeddings + torch.gather(
-                context_pos_emb, 1, 
-                context_positions.unsqueeze(-1).expand(-1, -1, self.n_embd)
-            )
-        
-        # Get position queries for target positions with positional embeddings
-        queries = self.position_queries.expand(B, -1, -1)  # (B, max_chunks, n_embd)
-        target_pos_emb = self.target_pos_embedding.expand(B, -1, -1)  # (B, max_chunks, n_embd)
-        
-        # Gather both position queries and positional embeddings for target positions
-        target_queries = torch.gather(queries, 1,
-                                     target_positions.unsqueeze(-1).expand(-1, -1, self.n_embd))  # (B, n_target, n_embd)
-        target_pos = torch.gather(target_pos_emb, 1,
-                                 target_positions.unsqueeze(-1).expand(-1, -1, self.n_embd))  # (B, n_target, n_embd)
-        
-        # Combine position queries with positional embeddings
-        x = target_queries + target_pos
-        
+        x = self.context_proj(context_embeddings)  # (B, n_context, n_embd)
+
+        # Add positional embeddings to context tokens
+        pos_emb = self.predictor_pos_embed.expand(B, -1, -1)  # (B, max_chunks, n_embd)
+        context_pos_emb = torch.gather(
+            pos_emb, 1,
+            context_positions.unsqueeze(-1).expand(-1, -1, self.n_embd)
+        )
+        x = x + context_pos_emb
+
+        # Store the number of context tokens
+        n_context_tokens = x.shape[1]
+
+        # Create mask tokens for target positions
+        mask_tokens = self.mask_token.repeat(B, n_target, 1)  # (B, n_target, n_embd)
+
+        # Add positional embeddings to mask tokens
+        pos_emb = self.predictor_pos_embed.expand(B, -1, -1)  # (B, max_chunks, n_embd)
+        target_pos_emb = torch.gather(
+            pos_emb, 1,
+            target_positions.unsqueeze(-1).expand(-1, -1, self.n_embd)
+        )
+        mask_tokens = mask_tokens + target_pos_emb
+
+        # Concatenate context and mask tokens
+        x = torch.cat([x, mask_tokens], dim=1)  # (B, n_context + n_target, n_embd)
+
+        # Forward through predictor blocks
         for block in self.blocks:
-            x = block(x, context_embeddings)
-        x = self.output_proj(norm(x))
+            x = block(x)
+
+        # Apply layer norm
+        x = self.predictor_norm(x)
+
+        # Extract only the predictions for mask tokens
+        x = x[:, n_context_tokens:]  # (B, n_target, n_embd)
+
+        # Project back to encoder dimension
+        x = self.output_proj(x)
+
         return x
 
     def configure_optimizers(self, wd, adam_lr, adam_betas):
