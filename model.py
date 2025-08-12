@@ -7,7 +7,6 @@ from torch import nn
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 import torch.nn.functional as F
 
-
 def get_1d_sincos_pos_embed(embed_dim, num_positions):
     """
     Generate 1D sinusoidal position embeddings.
@@ -30,7 +29,6 @@ def get_1d_sincos_pos_embed(embed_dim, num_positions):
 
     emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
     return emb
-
 
 class ChunkedRotary(nn.Module):
     def __init__(self, dim: int, max_seq_len: int):
@@ -138,7 +136,6 @@ class SelfAttention(nn.Module):
         y = self.c_proj(y)
         return y
 
-
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -160,20 +157,6 @@ class Block(nn.Module):
 
     def forward(self, x):
         x = x + self.attn_scale * self.attn(norm(x))
-        x = x + self.mlp(norm(x))
-        return x
-
-class PredictorBlock(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.attn = SelfAttention(config)
-        self.mlp = MLP(config)
-        self.attn_scale = (1 / math.sqrt(2 * config.n_layer))
-
-    def forward(self, x):
-        # Self-attention over both context and mask tokens
-        x = x + self.attn_scale * self.attn(norm(x))
-        # MLP
         x = x + self.mlp(norm(x))
         return x
 
@@ -255,7 +238,7 @@ class Encoder(nn.Module):
         self.chunk_pos_embedding.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
         self.blocks = nn.ModuleList([Block(config, chunked=False) for _ in range(config.n_layer)])
 
-    def forward(self, chunk_embeddings: torch.Tensor, chunk_positions: torch.LongTensor = None):
+    def forward(self, chunk_embeddings: torch.Tensor, chunk_positions: torch.LongTensor):
         """
         Args:
             chunk_embeddings: Tensor of shape (B, k, n_embd) containing chunk embeddings
@@ -265,15 +248,11 @@ class Encoder(nn.Module):
         """
         B, k, D = chunk_embeddings.shape
 
-        if chunk_positions is not None:
-            # Use provided positions to gather positional embeddings
-            pos_embeddings = self.chunk_pos_embedding.expand(B, -1, -1)  # (B, max_chunks, n_embd)
-            # Gather positional embeddings for the specified positions
-            x = chunk_embeddings + torch.gather(pos_embeddings, 1,
-                                               chunk_positions.unsqueeze(-1).expand(-1, -1, D))
-        else:
-            # Fall back to sequential positions (backward compatibility)
-            x = chunk_embeddings + self.chunk_pos_embedding[:, :k, :]
+        # Use provided positions to gather positional embeddings
+        pos_embeddings = self.chunk_pos_embedding.expand(B, -1, -1)  # (B, max_chunks, n_embd)
+        # Gather positional embeddings for the specified positions
+        x = chunk_embeddings + torch.gather(pos_embeddings, 1,
+                                            chunk_positions.unsqueeze(-1).expand(-1, -1, D))
 
         for block in self.blocks:
             x = block(x)
@@ -308,10 +287,8 @@ class Predictor(nn.Module):
         # Initialize with sinusoidal embeddings
         pos_embed = get_1d_sincos_pos_embed(config.n_embd, config.max_chunks)
         self.predictor_pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
-        self.blocks = nn.ModuleList([PredictorBlock(config) for _ in range(config.n_layer)])
-        self.predictor_norm = nn.LayerNorm(config.n_embd)
-        self.output_proj = nn.Linear(config.n_embd, config.n_encoder_embd, bias=True)
-        # Initialize mask token
+        self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+        self.output_proj = nn.Linear(config.n_embd, config.n_encoder_embd, bias=False)
         nn.init.normal_(self.mask_token, std=0.02)
 
     def forward(self, context_embeddings: torch.Tensor, target_positions: torch.LongTensor,
@@ -321,7 +298,6 @@ class Predictor(nn.Module):
             context_embeddings: Tensor of shape (B, n_context, n_encoder_embd) - visible chunk embeddings
             target_positions: Tensor of shape (B, n_target) - positions of chunks to predict
             context_positions: Optional tensor of shape (B, n_context) - original positions of context chunks
-
         Returns:
             Tensor of shape (B, n_target, n_encoder_embd) - predicted embeddings for masked positions
         """
@@ -356,19 +332,12 @@ class Predictor(nn.Module):
         # Concatenate context and mask tokens
         x = torch.cat([x, mask_tokens], dim=1)  # (B, n_context + n_target, n_embd)
 
-        # Forward through predictor blocks
         for block in self.blocks:
             x = block(x)
-
-        # Apply layer norm
-        x = self.predictor_norm(x)
-
+        x = norm(x)
         # Extract only the predictions for mask tokens
         x = x[:, n_context_tokens:]  # (B, n_target, n_embd)
-
-        # Project back to encoder dimension
         x = self.output_proj(x)
-
         return x
 
     def configure_optimizers(self, wd, adam_lr, adam_betas):
