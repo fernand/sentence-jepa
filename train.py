@@ -268,7 +268,6 @@ def main():
 
     train_pattern = os.path.join(args.dataset_path, 'fineweb-edu_train_*.bin')
     val_pattern = os.path.join(args.dataset_path, 'fineweb-edu_val_*.bin')
-
     train_loader = DataLoader(
         filename_pattern=train_pattern,
         B=args.batch_size,
@@ -277,7 +276,6 @@ def main():
         mask_ratio=args.mask_ratio,
         device=device
     )
-
     val_loader = DataLoader(
         filename_pattern=val_pattern,
         B=args.batch_size,
