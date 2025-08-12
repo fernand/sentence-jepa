@@ -33,8 +33,6 @@ def cleanup_distributed():
     if dist.is_initialized():
         dist.destroy_process_group()
 
-# EMA class removed - using direct parameter updates instead
-
 def compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions, chunk_mask):
     """
     Compute JEPA loss between predicted and target embeddings.
@@ -80,8 +78,9 @@ def train_step(
     with amp_context:
         # 1. Encode tokens to chunks
         chunk_embeddings = chunk_encoder(tokens)
-        # 2. Context path (with masking)
-        context_embeddings = context_encoder(chunk_embeddings, chunk_mask)
+        # 2. Context path - should NOT use mask tokens!
+        # Using mask tokens allows information leakage through self-attention
+        context_embeddings = context_encoder(chunk_embeddings, chunk_mask=None)
         # 3. Target path (no masking, no gradients)
         with torch.no_grad():
             target_embeddings = target_encoder(chunk_embeddings, chunk_mask=None)
@@ -94,10 +93,10 @@ def train_step(
         # Count visible chunks per batch
         n_visible_per_batch = visible_mask.sum(dim=1)  # (B,)
         max_visible = n_visible_per_batch.max().item()
-        
+
         # Create padded context tensor
         padded_context = torch.zeros(B, max_visible, D, device=context_embeddings.device, dtype=context_embeddings.dtype)
-        
+
         # Use advanced indexing to gather visible chunks efficiently
         for b in range(B):
             n_visible = n_visible_per_batch[b].item()
@@ -132,7 +131,7 @@ def validate(chunk_encoder, context_encoder, target_encoder, predictor, val_load
             batch = val_loader.next_batch()
             with amp_context:
                 chunk_embeddings = chunk_encoder(batch['tokens'])
-                context_embeddings = context_encoder(chunk_embeddings, batch['chunk_mask'])
+                context_embeddings = context_encoder(chunk_embeddings, chunk_mask=None)
                 target_embeddings = target_encoder(chunk_embeddings, chunk_mask=None)
 
                 # Extract only visible context chunks for predictor
@@ -143,10 +142,10 @@ def validate(chunk_encoder, context_encoder, target_encoder, predictor, val_load
                 # Efficient vectorized gathering of visible chunks
                 n_visible_per_batch = visible_mask.sum(dim=1)
                 max_visible = n_visible_per_batch.max().item()
-                
+
                 # Create padded context tensor
                 padded_context = torch.zeros(B, max_visible, D, device=context_embeddings.device, dtype=context_embeddings.dtype)
-                
+
                 # Use advanced indexing to gather visible chunks
                 for b in range(B):
                     n_visible = n_visible_per_batch[b].item()
@@ -386,7 +385,6 @@ def main():
             'predictor': get_module(predictor).state_dict(),
             'optimizers': [opt.state_dict() for opt in optimizers],
             'schedulers': [sched.state_dict() for sched in schedulers],
-            'ema': ema.shadow,
             'args': args,
         }
         torch.save(checkpoint, 'checkpoint_final.pt')
