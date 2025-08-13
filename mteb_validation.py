@@ -169,7 +169,7 @@ class JEPAModelForMTEB:
         tokenizer,
         chunk_size,
         device='cuda',
-        batch_size=32,
+        batch_size=128,
         max_chunks=64,
     ):
         self.chunk_encoder = target_chunk_encoder.to(device).eval()
@@ -215,7 +215,7 @@ class JEPAModelForMTEB:
 
 
 def compute_arxiv_hcp2p_score(chunk_encoder, encoder, target_chunk_encoder, target_encoder,
-                              tokenizer, chunk_size, device, batch_size=32):
+                              tokenizer, chunk_size, device, batch_size=128):
     """
     Compute ArXivHierarchicalClusteringP2P V-measure using MTEB.
     Uses the EMA (target) encoders for more stable evaluation.
@@ -250,8 +250,8 @@ def compute_arxiv_hcp2p_score(chunk_encoder, encoder, target_chunk_encoder, targ
     # Create MTEB evaluation object with minimal verbosity
     evaluation = mteb.MTEB(tasks=tasks, verbosity=0)
 
-    # Run evaluation
-    results = evaluation.run(model, verbosity=0)
+    # Run evaluation with explicit batch size
+    results = evaluation.run(model, verbosity=0, batch_size=batch_size)
 
     # Remove cache after evaluation
     shutil.rmtree('results')
