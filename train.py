@@ -91,7 +91,7 @@ def compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions,
     if valid_mask.any():
         loss = cosine_weight * (
             1 -  F.cosine_similarity(predicted_embeddings[valid_mask], gathered_targets[valid_mask], 1, 1e-8).mean()
-            ) + (1 - cosine_weight) * F.smooth_l1_loss(
+            ) + (1 - cosine_weight) * F.l1_loss(
                 predicted_embeddings[valid_mask],
                 gathered_targets[valid_mask],
                 reduction='mean'
