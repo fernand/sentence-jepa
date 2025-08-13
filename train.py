@@ -67,7 +67,7 @@ def extract_visible_chunks(chunk_embeddings, chunk_mask):
             visible_positions[b, :n_visible] = positions[visible_mask[b]]
     return visible_chunks, visible_positions
 
-def compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions, chunk_mask):
+def compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions, chunk_mask, cosine_weight):
     """
     Compute JEPA loss between predicted and target embeddings.
     Args:
@@ -87,18 +87,19 @@ def compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions,
     n_masked_per_batch = chunk_mask.sum(dim=1)  # (B,)
     valid_mask = torch.arange(max_targets, device=device).unsqueeze(0) < n_masked_per_batch.unsqueeze(1)
     if valid_mask.any():
-        # Compute L1 loss only on valid positions
-        loss = F.l1_loss(
-            predicted_embeddings[valid_mask],
-            gathered_targets[valid_mask],
-            reduction='mean'
-        )
+        loss = cosine_weight * (
+            1 -  F.cosine_similarity(predicted_embeddings[valid_mask], gathered_targets[valid_mask], D, 1e-8).mean()
+            ) + (1 - cosine_weight) * F.smooth_l1_loss(
+                predicted_embeddings[valid_mask],
+                gathered_targets[valid_mask],
+                reduction='mean'
+            )
         return loss
     else:
         return torch.tensor(0.0, device=device, dtype=predicted_embeddings.dtype)
 
 def train_step(
-    chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor, batch, optimizers):
+    chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor, batch, optimizers, cosine_weight):
     tokens = batch['tokens']
     chunk_mask = batch['chunk_mask']
     target_positions = batch['target_positions']
@@ -120,14 +121,15 @@ def train_step(
             target_embeddings = target_encoder(target_chunk_embeddings, all_positions)
         # Predict masked chunks using context from visible chunks only
         predicted_embeddings = predictor(context_embeddings, target_positions, visible_positions)
-        loss = compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions, chunk_mask)
+        loss = compute_jepa_loss(
+            predicted_embeddings, target_embeddings, target_positions, chunk_mask, cosine_weight)
     loss.backward()
     for optimizer in optimizers:
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
     return loss.item()
 
-def validate(chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor, val_loader):
+def validate(chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor, val_loader, cosine_weight):
     chunk_encoder.eval()
     encoder.eval()
     target_chunk_encoder.eval()
@@ -152,7 +154,7 @@ def validate(chunk_encoder, encoder, target_chunk_encoder, target_encoder, predi
             predicted_embeddings = predictor(context_embeddings, batch['target_positions'], visible_positions)
             loss = compute_jepa_loss(
                 predicted_embeddings, target_embeddings,
-                batch['target_positions'], batch['chunk_mask']
+                batch['target_positions'], batch['chunk_mask'], cosine_weight
             )
             val_losses.append(loss.item())
     chunk_encoder.train()
@@ -166,16 +168,17 @@ def main():
     parser = argparse.ArgumentParser(description='Train JEPA model')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size per GPU')
     parser.add_argument('--learning_rate', type=float, default=3e-4, help='Max learning rate')
+    parser.add_argument('--cosine_weight', type=float, default=0.3, help='How much to weight the cosine similarity loss.')
     parser.add_argument('--weight_decay', type=float, default=0.04, help='Starting weight decay for AdamW optimizer')
     parser.add_argument('--final_weight_decay', type=float, default=0.4, help='Final weight decay for AdamW optimizer')
+    parser.add_argument('--ema_start', type=float, default=0.996, help='Starting EMA decay rate')
+    parser.add_argument('--ema_end', type=float, default=1.0, help='Final EMA decay rate')
+    parser.add_argument('--mask_ratio', type=float, default=0.50, help='Chunk masking ratio')
     parser.add_argument('--val_loss_every', type=int, default=250, help='Validation frequency')
     parser.add_argument('--project_name', type=str, default='sentence-jepa', help='Comet ML project name')
     parser.add_argument('--num_steps', type=int, default=None, help='Number of training steps')
     parser.add_argument('--dataset_path', type=str, default='data/fineweb-edu_10B', help='Path to dataset')
     parser.add_argument('--warmup_steps', type=int, default=None, help='Number of warmup steps')
-    parser.add_argument('--ema_start', type=float, default=0.996, help='Starting EMA decay rate')
-    parser.add_argument('--ema_end', type=float, default=1.0, help='Final EMA decay rate')
-    parser.add_argument('--mask_ratio', type=float, default=0.50, help='Chunk masking ratio')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--compile', action='store_true', help='Use torch.compile')
     parser.add_argument('--use_comet', action='store_true', help='Use Comet ML for logging')
@@ -363,8 +366,9 @@ def main():
                 param_group['weight_decay'] = current_wd
 
         loss = train_step(
-            chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor, batch, optimizers)
-        batch_time = time.perf_counter() - batch_start_time
+            chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor, batch,
+            optimizers, args.cosine_weight
+        )
 
         # Update target encoders with EMA using scheduled decay
         current_ema = get_ema_decay(step)
@@ -377,6 +381,8 @@ def main():
             context_model = get_module(encoder)
             for param_q, param_k in zip(context_model.parameters(), target_encoder.parameters()):
                 param_k.data.mul_(current_ema).add_(param_q.data, alpha=1 - current_ema)
+
+        batch_time = time.perf_counter() - batch_start_time
 
         # Update learning rate schedulers (after warmup)
         if step >= args.warmup_steps:
@@ -395,7 +401,7 @@ def main():
         if step % args.val_loss_every == 0 and step > 0:
             val_loss = validate(
                 chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor,
-                val_loader
+                val_loader, args.cosine_weight
             )
             if rank == 0:
                 print(f'Step {step} | Validation Loss: {val_loss:.4f}')
