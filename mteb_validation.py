@@ -1,15 +1,16 @@
 """MTEB validation utilities with caching disabled for training."""
 
-import torch
-import torch.nn.functional as F
-import numpy as np
-from scipy.stats import spearmanr
-from datasets import load_dataset
-import mteb
-from typing import Optional
-from mteb.encoder_interface import PromptType
 import os
 import shutil
+
+import mteb
+import numpy as np
+import torch
+import torch.nn.functional as F
+from scipy.stats import spearmanr
+from datasets import load_dataset
+from typing import Optional
+from mteb.encoder_interface import PromptType
 
 
 def encode_sentence_for_sts(text, tokenizer, chunk_encoder, encoder, chunk_size, device, max_chunks=64, eos_token_id=None):
@@ -228,7 +229,8 @@ def compute_arxiv_hcp2p_score(chunk_encoder, encoder, target_chunk_encoder, targ
     target_encoder.eval()
 
     # Remove cache before evaluation.
-    shutil.rmtree('results')
+    if os.path.exists('results'):
+        shutil.rmtree('results')
 
     # Create MTEB wrapper model with unique name
     model = JEPAModelForMTEB(
