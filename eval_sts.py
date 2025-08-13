@@ -290,7 +290,10 @@ def main():
 
     # Optionally save results
     import json
-    results_file = args.checkpoint.replace('.pt', f'_{args.dataset}_results.json')
+    from pathlib import Path
+    checkpoint_dir = Path(args.checkpoint).parent
+    checkpoint_name = Path(args.checkpoint).name
+    results_file = checkpoint_dir / checkpoint_name.replace('.pt', f'_{args.dataset.replace('/', '_')}_results.json')
     with open(results_file, 'w') as f:
         json.dump({
             'checkpoint': args.checkpoint,
