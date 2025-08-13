@@ -60,11 +60,15 @@ def encode_sentence_for_sts(text, tokenizer, chunk_encoder, encoder, chunk_size,
     return sentence_embedding
 
 
-def compute_stsb_spearman(chunk_encoder, encoder, target_chunk_encoder, target_encoder, tokenizer, chunk_size, device, num_samples=250):
+def compute_stsb_spearman(chunk_encoder, encoder, target_chunk_encoder, target_encoder, tokenizer, chunk_size, device, num_samples=None):
     """
-    Compute Spearman correlation on a subset of STS-B validation set.
+    Compute Spearman correlation on STS-B validation set.
     Uses the EMA (target) encoders for more stable evaluation.
     Expects a tokenizers.Tokenizer object.
+    
+    Args:
+        num_samples: If provided and less than dataset size, will sample a subset.
+                    If None, uses the entire dataset.
     """
     chunk_encoder.eval()
     encoder.eval()
@@ -81,8 +85,8 @@ def compute_stsb_spearman(chunk_encoder, encoder, target_chunk_encoder, target_e
     # Load STS-B validation data
     dataset = load_dataset('glue', 'stsb', split='validation')
 
-    # Sample a subset for faster evaluation during training
-    if num_samples < len(dataset):
+    # Only sample if num_samples is provided and less than dataset size
+    if num_samples is not None and num_samples < len(dataset):
         indices = np.random.choice(len(dataset), num_samples, replace=False)
         dataset = dataset.select(indices)
 

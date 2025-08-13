@@ -185,6 +185,7 @@ def main():
     parser.add_argument('--compile', action='store_true', help='Use torch.compile')
     parser.add_argument('--use_comet', action='store_true', help='Use Comet ML for logging')
     parser.add_argument('--eval_stsb', action='store_true', help='Evaluate STS-B Spearman correlation during validation')
+    parser.add_argument('--stsb_samples', type=int, default=None, help='Number of STS-B samples to use (None for full dataset)')
     args = parser.parse_args()
 
 
@@ -419,7 +420,7 @@ def main():
             if args.eval_stsb and rank == 0:
                 stsb_spearman = compute_stsb_spearman(
                     chunk_encoder, encoder, target_chunk_encoder, target_encoder,
-                    tokenizer, chunk_size, device, num_samples=250
+                    tokenizer, chunk_size, device, num_samples=args.stsb_samples
                 )
 
             if rank == 0:
