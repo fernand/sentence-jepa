@@ -1,4 +1,4 @@
-"""MTEB validation utilities for training including STS-B and P2P tasks."""
+"""MTEB validation utilities with caching disabled for training."""
 
 import torch
 import torch.nn.functional as F
@@ -8,6 +8,8 @@ from datasets import load_dataset
 import mteb
 from typing import Optional
 from mteb.encoder_interface import PromptType
+import os
+import shutil
 
 
 def encode_sentence_for_sts(text, tokenizer, chunk_encoder, encoder, chunk_size, device, max_chunks=64, eos_token_id=None):
@@ -168,7 +170,8 @@ class JEPAModelForMTEB:
         chunk_size,
         device='cuda',
         batch_size=32,
-        max_chunks=64
+        max_chunks=64,
+        model_name_suffix=None  # Add suffix to avoid caching conflicts
     ):
         self.chunk_encoder = target_chunk_encoder.to(device).eval()
         self.encoder = target_encoder.to(device).eval()
@@ -178,6 +181,13 @@ class JEPAModelForMTEB:
         self.batch_size = batch_size
         self.max_chunks = max_chunks
         self.eos_token_id = tokenizer.token_to_id('<|endoftext|>')
+        
+        # Add a unique model name to avoid caching issues
+        if model_name_suffix:
+            self.model_name = f"jepa_model_{model_name_suffix}"
+        else:
+            import uuid
+            self.model_name = f"jepa_model_{uuid.uuid4().hex[:8]}"
 
     def encode(
         self,
@@ -212,11 +222,17 @@ class JEPAModelForMTEB:
         return np.vstack(all_embeddings)
 
 
-def compute_arxiv_hcp2p_score(chunk_encoder, encoder, target_chunk_encoder, target_encoder, tokenizer, chunk_size, device, batch_size=32):
+def compute_arxiv_hcp2p_score(chunk_encoder, encoder, target_chunk_encoder, target_encoder, 
+                              tokenizer, chunk_size, device, batch_size=32, 
+                              disable_cache=True, model_suffix=None):
     """
     Compute ArXivHierarchicalClusteringP2P V-measure using MTEB.
     Uses the EMA (target) encoders for more stable evaluation.
-
+    
+    Args:
+        disable_cache: If True, removes MTEB cache before and after evaluation
+        model_suffix: Optional suffix for model name to avoid cache conflicts
+    
     Returns:
         v_measure: The V-measure score from the clustering task
     """
@@ -224,15 +240,20 @@ def compute_arxiv_hcp2p_score(chunk_encoder, encoder, target_chunk_encoder, targ
     encoder.eval()
     target_chunk_encoder.eval()
     target_encoder.eval()
+    
+    # Remove cache before evaluation if requested
+    if disable_cache and os.path.exists('results'):
+        shutil.rmtree('results')
 
-    # Create MTEB wrapper model
+    # Create MTEB wrapper model with unique name
     model = JEPAModelForMTEB(
         target_chunk_encoder=target_chunk_encoder,
         target_encoder=target_encoder,
         tokenizer=tokenizer,
         chunk_size=chunk_size,
         device=device,
-        batch_size=batch_size
+        batch_size=batch_size,
+        model_name_suffix=model_suffix
     )
 
     # Get the ArXivHierarchicalClusteringP2P task
@@ -247,6 +268,10 @@ def compute_arxiv_hcp2p_score(chunk_encoder, encoder, target_chunk_encoder, targ
 
     # Run evaluation
     results = evaluation.run(model)
+    
+    # Remove cache after evaluation if requested
+    if disable_cache and os.path.exists('results'):
+        shutil.rmtree('results')
 
     chunk_encoder.train()
     encoder.train()
