@@ -77,26 +77,10 @@ class ChunkedSelfAttention(nn.Module):
         self.block_mask = None
         self.cached_seq_len = None
 
-    def forward(self, x):
+    def forward(self, x, attention_mask=None):
         B, T, C = x.size()
         chunk_size = self.chunk_size
-        if self.block_mask is None or self.cached_seq_len != T:
-            def make_chunk_mask(b, h, q_idx, kv_idx):
-                # Each position can only attend within its chunk
-                q_chunk = q_idx // chunk_size
-                kv_chunk = kv_idx // chunk_size
-                return q_chunk == kv_chunk
-
-            self.block_mask = create_block_mask(
-                make_chunk_mask,
-                B=1,  # Create for batch size 1, will be broadcasted
-                H=1,  # Create for 1 head, will be broadcasted
-                Q_LEN=T,
-                KV_LEN=T,
-                device=x.device,
-                _compile=True
-            )
-            self.cached_seq_len = T
+        
         qkv = self.c_attn(x)
         q, k, v = qkv.split(self.n_embd, dim=2)
         # Reshape for multi-head attention
@@ -111,7 +95,47 @@ class ChunkedSelfAttention(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        y = flex_attention(q, k, v, block_mask=self.block_mask)
+        if attention_mask is not None:
+            # When we have padding, use standard SDPA with a combined mask
+            # Create chunk boundaries mask
+            positions = torch.arange(T, device=x.device)
+            chunk_ids = positions // chunk_size
+            # Create mask where positions can only attend within their chunk
+            chunk_mask = chunk_ids.unsqueeze(0) == chunk_ids.unsqueeze(1)  # (T, T)
+            chunk_mask = chunk_mask.unsqueeze(0).unsqueeze(0)  # (1, 1, T, T)
+            
+            # Expand attention_mask for attention computation
+            # attention_mask is (B, T) with True for valid positions
+            key_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, T)
+            query_mask = attention_mask.unsqueeze(1).unsqueeze(3)  # (B, 1, T, 1)
+            padding_mask = query_mask & key_mask  # (B, 1, T, T)
+            
+            # Combine: must be in same chunk AND both positions must be valid
+            combined_mask = chunk_mask & padding_mask  # (B, 1, T, T)
+            
+            # Use scaled_dot_product_attention with is_causal=False and attention mask
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=combined_mask, is_causal=False)
+        else:
+            # Use flex_attention for normal training without masks
+            if self.block_mask is None or self.cached_seq_len != T:
+                def make_chunk_mask(b, h, q_idx, kv_idx):
+                    # Each position can only attend within its chunk
+                    q_chunk = q_idx // chunk_size
+                    kv_chunk = kv_idx // chunk_size
+                    return q_chunk == kv_chunk
+
+                self.block_mask = create_block_mask(
+                    make_chunk_mask,
+                    B=1,  # Create for batch size 1, will be broadcasted
+                    H=1,  # Create for 1 head, will be broadcasted
+                    Q_LEN=T,
+                    KV_LEN=T,
+                    device=x.device,
+                    _compile=True
+                )
+                self.cached_seq_len = T
+            
+            y = flex_attention(q, k, v, block_mask=self.block_mask)
 
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.c_proj(y)
@@ -156,12 +180,16 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, config, chunked: bool = False):
         super().__init__()
+        self.chunked = chunked
         self.attn = ChunkedSelfAttention(config) if chunked else SelfAttention(config)
         self.mlp = MLP(config)
         self.attn_scale = (1 / math.sqrt(2 * config.n_layer))
 
-    def forward(self, x):
-        x = x + self.attn_scale * self.attn(norm(x))
+    def forward(self, x, attention_mask=None):
+        if self.chunked and attention_mask is not None:
+            x = x + self.attn_scale * self.attn(norm(x), attention_mask)
+        else:
+            x = x + self.attn_scale * self.attn(norm(x))
         x = x + self.mlp(norm(x))
         return x
 
@@ -182,11 +210,13 @@ class ChunkEncoder(nn.Module):
         self.transformer = nn.ModuleList([Block(config, chunked=True) for _ in range(config.n_layer)])
         self.cls_token = nn.Parameter(torch.randn(1, 1, config.n_embd))
 
-    def forward(self, idx: torch.LongTensor):
+    def forward(self, idx: torch.LongTensor, attention_mask: torch.BoolTensor = None):
         """
         Args:
             idx: Token indices of shape (B, k * (chunk_size - 1))
                  where k is the number of chunks
+            attention_mask: Optional boolean mask of shape (B, k * (chunk_size - 1))
+                          where True indicates valid tokens, False indicates padding
         Returns:
             chunk_embeddings: Tensor of shape (B, k, n_embd)
                              containing the CLS token embedding for each chunk
@@ -209,8 +239,19 @@ class ChunkEncoder(nn.Module):
         cls_tokens = self.cls_token.expand(B, n_chunks, 1, self.config.n_embd)
         x = torch.cat([cls_tokens, x], dim=2)  # (B, n_chunks, chunk_size, n_embd)
         x = x.view(B, n_chunks * chunk_size, self.config.n_embd)
+        
+        # Prepare attention mask if provided
+        full_attention_mask = None
+        if attention_mask is not None:
+            # Reshape attention mask to match chunks
+            mask_reshaped = attention_mask.view(B, n_chunks, tokens_per_chunk)
+            # Add True for CLS tokens (always valid)
+            cls_mask = torch.ones(B, n_chunks, 1, dtype=torch.bool, device=attention_mask.device)
+            full_mask = torch.cat([cls_mask, mask_reshaped], dim=2)  # (B, n_chunks, chunk_size)
+            full_attention_mask = full_mask.view(B, n_chunks * chunk_size)
+        
         for block in self.transformer:
-            x = block(x)
+            x = block(x, full_attention_mask)
         x = norm(x)
 
         # Reshape to chunks and extract CLS tokens
