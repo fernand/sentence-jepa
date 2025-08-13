@@ -238,25 +238,27 @@ def main():
 
     experiment = None
     if args.use_comet and rank == 0:
-        try:
-            import comet_ml
-            experiment = comet_ml.Experiment(
-                project_name=args.project_name,
-                auto_metric_logging=True,
-                auto_param_logging=True,
-            )
-            experiment.log_parameters(vars(args))
-            experiment.log_parameter('total_batch_size', args.batch_size * world_size)
-            experiment.log_parameter('world_size', world_size)
-            experiment.log_parameter('tokens_per_step', seq_len * args.batch_size * world_size)
-            experiment.log_parameter('seq_len', seq_len)
-            experiment.log_parameter('beta2', beta2)
-            experiment.log_parameter('ema_start', args.ema_start)
-            experiment.log_parameter('ema_end', args.ema_end)
-            experiment.log_parameter('weight_decay_start', args.weight_decay)
-            experiment.log_parameter('weight_decay_final', args.final_weight_decay)
-        except ImportError:
-            print('Comet ML not installed, continuing without logging')
+        import comet_ml
+        experiment = comet_ml.Experiment(
+            project_name=args.project_name,
+            auto_metric_logging=True,
+            auto_param_logging=True,
+        )
+        experiment.log_parameters(vars(args))
+        experiment.log_parameter('total_batch_size', args.batch_size * world_size)
+        experiment.log_parameter('world_size', world_size)
+        experiment.log_parameter('tokens_per_step', seq_len * args.batch_size * world_size)
+        experiment.log_parameter('seq_len', seq_len)
+        experiment.log_parameter('beta2', beta2)
+        experiment.log_parameter('ema_start', args.ema_start)
+        experiment.log_parameter('ema_end', args.ema_end)
+        experiment.log_parameter('weight_decay_start', args.weight_decay)
+        experiment.log_parameter('weight_decay_final', args.final_weight_decay)
+        model_dir = f'models/{experiment.id}'
+    elif not args.use_comet:
+        import uuid
+        model_dir = f'models/{uuid.uuid4()}'
+    os.makedirs(model_dir, exist_ok=True)
 
     chunk_encoder = ChunkEncoder(chunk_enc_config).to(device)
     encoder = Encoder(enc_config).to(device)
@@ -413,7 +415,7 @@ def main():
                 'current_ema': current_ema,
                 'args': args,
             }
-            torch.save(checkpoint, f'checkpoint_step_{step}.pt')
+            torch.save(checkpoint, f'{model_dir}/checkpoint_step_{step}.pt')
             print(f'Saved checkpoint at step {step}')
 
     if rank == 0:
@@ -428,7 +430,7 @@ def main():
             'schedulers': [sched.state_dict() for sched in schedulers],
             'args': args,
         }
-        torch.save(checkpoint, 'checkpoint_final.pt')
+        torch.save(checkpoint, f'{model_dir}/checkpoint_final.pt')
         print('Training complete! Saved final checkpoint.')
 
     cleanup_distributed()
