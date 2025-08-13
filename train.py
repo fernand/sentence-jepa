@@ -165,7 +165,7 @@ def validate(chunk_encoder, encoder, target_chunk_encoder, target_encoder, predi
 def main():
     parser = argparse.ArgumentParser(description='Train JEPA model')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size per GPU')
-    parser.add_argument('--learning_rate', type=float, default=1e-3, help='Max learning rate')
+    parser.add_argument('--learning_rate', type=float, default=3e-4, help='Max learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.04, help='Starting weight decay for AdamW optimizer')
     parser.add_argument('--final_weight_decay', type=float, default=0.4, help='Final weight decay for AdamW optimizer')
     parser.add_argument('--val_loss_every', type=int, default=250, help='Validation frequency')
