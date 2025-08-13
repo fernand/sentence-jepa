@@ -159,11 +159,12 @@ def evaluate_sts_benchmark(model_components, tokenizer, device, dataset_name='st
         sentences1 = test_data['sentence1']
         sentences2 = test_data['sentence2']
         scores = np.array(test_data['label'])
-    elif dataset_name == 'sts16-sts':
+    elif dataset_name.startswith('mteb/sts'):
         dataset = load_dataset('mteb/sts16-sts')
         test_data = dataset['test']
         sentences1 = test_data['sentence1']
         sentences2 = test_data['sentence2']
+        scores = np.array(test_data['score'])
     else:
         # For other STS datasets, you might need different loading logic
         raise NotImplementedError(f"Dataset {dataset_name} not implemented yet")
