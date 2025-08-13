@@ -11,7 +11,7 @@ from model import (
     ChunkEncoder, ChunkEncoderConfig,
     Encoder, EncoderConfig,
 )
-from sts_validation import (
+from mteb_validation import (
     encode_sentence_for_sts,
     encode_batch_for_sts,
     compute_stsb_spearman

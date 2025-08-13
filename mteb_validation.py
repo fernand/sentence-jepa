@@ -1,10 +1,13 @@
-"""STS-B validation utilities for training."""
+"""MTEB validation utilities for training including STS-B and P2P tasks."""
 
 import torch
 import torch.nn.functional as F
 import numpy as np
 from scipy.stats import spearmanr
 from datasets import load_dataset
+import mteb
+from typing import Optional
+from mteb.encoder_interface import PromptType
 
 
 def encode_sentence_for_sts(text, tokenizer, chunk_encoder, encoder, chunk_size, device, max_chunks=64, eos_token_id=None):
@@ -149,3 +152,118 @@ def compute_stsb_spearman(chunk_encoder, encoder, target_chunk_encoder, target_e
     target_encoder.train()
 
     return spearman_corr
+
+
+class JEPAModelForMTEB:
+    """
+    Wrapper class for JEPA model to work with MTEB evaluation framework.
+    Uses the target (EMA) encoders for evaluation.
+    """
+
+    def __init__(
+        self,
+        target_chunk_encoder,
+        target_encoder,
+        tokenizer,
+        chunk_size,
+        device='cuda',
+        batch_size=32,
+        max_chunks=64
+    ):
+        self.chunk_encoder = target_chunk_encoder.to(device).eval()
+        self.encoder = target_encoder.to(device).eval()
+        self.tokenizer = tokenizer
+        self.chunk_size = chunk_size
+        self.device = device
+        self.batch_size = batch_size
+        self.max_chunks = max_chunks
+        self.eos_token_id = tokenizer.token_to_id('<|endoftext|>')
+
+    def encode(
+        self,
+        sentences: list[str],
+        task_name: str,
+        prompt_type: Optional[PromptType] = None,
+        **kwargs,
+    ) -> np.ndarray:
+        """
+        Encodes the given sentences using the JEPA encoder.
+        """
+        if not sentences:
+            return np.empty((0, self.encoder.config.n_embd))
+
+        all_embeddings = []
+
+        # Process in batches for efficiency
+        for i in range(0, len(sentences), self.batch_size):
+            batch_sentences = sentences[i:i + self.batch_size]
+            batch_embeddings = encode_batch_for_sts(
+                batch_sentences,
+                self.tokenizer,
+                self.chunk_encoder,
+                self.encoder,
+                self.chunk_size,
+                self.device,
+                max_chunks=self.max_chunks,
+                eos_token_id=self.eos_token_id
+            )
+            all_embeddings.append(batch_embeddings.cpu().numpy())
+
+        return np.vstack(all_embeddings)
+
+
+def compute_arxiv_hcp2p_vmeasure(chunk_encoder, encoder, target_chunk_encoder, target_encoder, tokenizer, chunk_size, device, batch_size=32):
+    """
+    Compute ArXivHierarchicalClusteringP2P V-measure using MTEB.
+    Uses the EMA (target) encoders for more stable evaluation.
+    
+    Returns:
+        v_measure: The V-measure score from the clustering task
+    """
+    chunk_encoder.eval()
+    encoder.eval()
+    target_chunk_encoder.eval()
+    target_encoder.eval()
+
+    # Create MTEB wrapper model
+    model = JEPAModelForMTEB(
+        target_chunk_encoder=target_chunk_encoder,
+        target_encoder=target_encoder,
+        tokenizer=tokenizer,
+        chunk_size=chunk_size,
+        device=device,
+        batch_size=batch_size
+    )
+
+    # Get the ArXivHierarchicalClusteringP2P task
+    tasks = mteb.get_tasks(tasks=['ArXivHierarchicalClusteringP2P'])
+    
+    if not tasks:
+        print("Warning: ArXivHierarchicalClusteringP2P task not found")
+        return 0.0
+    
+    # Create MTEB evaluation object with minimal verbosity
+    evaluation = mteb.MTEB(tasks=tasks, verbosity=0)
+    
+    # Run evaluation
+    results = evaluation.run(model)
+    
+    chunk_encoder.train()
+    encoder.train()
+    target_chunk_encoder.train()
+    target_encoder.train()
+    
+    # Extract V-measure score
+    if results and len(results) > 0:
+        # MTEB returns a list of task results
+        task_result = results[0]
+        # Access the test scores correctly
+        if hasattr(task_result, 'scores') and 'test' in task_result.scores:
+            test_scores = task_result.scores['test']
+            if isinstance(test_scores, list) and len(test_scores) > 0:
+                # For clustering tasks, scores is a list with one element
+                v_measure = test_scores[0]['v_measure']
+            else:
+                v_measure = test_scores.get('v_measure', 0.0)
+            return v_measure
+    return 0.0

@@ -18,7 +18,7 @@ from model import (
     Encoder, EncoderConfig,
     Predictor, PredictorConfig
 )
-from sts_validation import compute_stsb_spearman
+from mteb_validation import compute_stsb_spearman, compute_arxiv_hcp2p_vmeasure
 
 def setup_distributed():
     """Initialize distributed training if available."""
@@ -132,40 +132,6 @@ def train_step(
         optimizer.zero_grad(set_to_none=True)
     return loss.item()
 
-def validate(chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor, val_loader, cosine_weight):
-    chunk_encoder.eval()
-    encoder.eval()
-    target_chunk_encoder.eval()
-    target_encoder.eval()
-    predictor.eval()
-    val_losses = []
-    amp_context = torch.autocast(device_type='cuda', dtype=torch.bfloat16)
-    for _ in range(50):  # Validate on 50 batches
-        batch = val_loader.next_batch()
-        with amp_context, torch.no_grad():
-            chunk_embeddings = chunk_encoder(batch['tokens'])
-            chunk_mask = batch['chunk_mask']
-            # I-JEPA style: Extract ONLY visible chunks for context encoder
-            visible_chunks, visible_positions = extract_visible_chunks(chunk_embeddings, chunk_mask)
-            # Context encoder processes ONLY visible chunks with their positions
-            context_embeddings = encoder(visible_chunks, visible_positions)
-            # Target path uses EMA versions for validation too
-            target_chunk_embeddings = target_chunk_encoder(batch['tokens'])
-            all_positions = torch.arange(target_chunk_embeddings.shape[1], device=target_chunk_embeddings.device)
-            all_positions = all_positions.unsqueeze(0).expand(target_chunk_embeddings.shape[0], -1)
-            target_embeddings = target_encoder(target_chunk_embeddings, all_positions)
-            predicted_embeddings = predictor(context_embeddings, batch['target_positions'], visible_positions)
-            loss = compute_jepa_loss(
-                predicted_embeddings, target_embeddings,
-                batch['target_positions'], batch['chunk_mask'], cosine_weight
-            )
-            val_losses.append(loss.item())
-    chunk_encoder.train()
-    encoder.train()
-    target_chunk_encoder.train()
-    target_encoder.train()
-    predictor.train()
-    return sum(val_losses) / len(val_losses) if val_losses else 0.0
 
 def main():
     parser = argparse.ArgumentParser(description='Train JEPA model')
@@ -178,6 +144,7 @@ def main():
     parser.add_argument('--ema_end', type=float, default=1.0, help='Final EMA decay rate')
     parser.add_argument('--mask_ratio', type=float, default=0.50, help='Chunk masking ratio')
     parser.add_argument('--val_loss_every', type=int, default=250, help='Validation frequency')
+    parser.add_argument('--eval_arxiv_p2p', action='store_true', help='Evaluate ArXivHierarchicalClusteringP2P V-measure during validation')
     parser.add_argument('--project_name', type=str, default='sentence-jepa', help='Comet ML project name')
     parser.add_argument('--num_steps', type=int, default=None, help='Number of training steps')
     parser.add_argument('--dataset_path', type=str, default='data/fineweb-edu_10B', help='Path to dataset')
@@ -411,10 +378,13 @@ def main():
                 experiment.log_metric('ema_decay', current_ema, step=step)
 
         if step % args.val_loss_every == 0 and step > 0:
-            val_loss = validate(
-                chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor,
-                val_loader, args.cosine_weight
-            )
+            # Compute ArXivHierarchicalClusteringP2P V-measure if requested
+            arxiv_vmeasure = None
+            if args.eval_arxiv_p2p and rank == 0:
+                arxiv_vmeasure = compute_arxiv_hcp2p_vmeasure(
+                    chunk_encoder, encoder, target_chunk_encoder, target_encoder,
+                    tokenizer, chunk_size, device
+                )
 
             # Compute STS-B Spearman correlation if requested
             stsb_spearman = None
@@ -425,15 +395,16 @@ def main():
                 )
 
             if rank == 0:
+                metrics_str = f'Step {step}'
+                if arxiv_vmeasure is not None:
+                    metrics_str += f' | ArXiv P2P V-measure: {arxiv_vmeasure:.4f}'
+                    if experiment:
+                        experiment.log_metric('arxiv_hcp2p_vmeasure', arxiv_vmeasure, step=step)
                 if stsb_spearman is not None:
-                    print(f'Step {step} | Validation Loss: {val_loss:.4f} | STS-B Spearman: {stsb_spearman:.4f}')
+                    metrics_str += f' | STS-B Spearman: {stsb_spearman:.4f}'
                     if experiment:
-                        experiment.log_metric('val_loss', val_loss, step=step)
                         experiment.log_metric('stsb_spearman', stsb_spearman, step=step)
-                else:
-                    print(f'Step {step} | Validation Loss: {val_loss:.4f}')
-                    if experiment:
-                        experiment.log_metric('val_loss', val_loss, step=step)
+                print(metrics_str)
 
         if rank == 0 and step % 5000 == 0 and step > 0:
             checkpoint = {

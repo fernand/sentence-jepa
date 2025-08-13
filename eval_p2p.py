@@ -5,108 +5,19 @@ Uses the target (EMA) encoders for more stable evaluation.
 """
 
 import argparse
-from typing import Optional
-import numpy as np
 import torch
 import tokenizers
-from tqdm import tqdm
 
 import mteb
-from mteb.encoder_interface import PromptType
 
 from model import (
     ChunkEncoder, ChunkEncoderConfig,
     Encoder, EncoderConfig,
 )
-from sts_validation import encode_batch_for_sts
+from mteb_validation import JEPAModelForMTEB
 
 
-class JEPAModelForMTEB:
-    """
-    Wrapper class for JEPA model to work with MTEB evaluation framework.
-    Uses the target (EMA) encoders for evaluation.
-    """
-
-    def __init__(
-        self,
-        target_chunk_encoder,
-        target_encoder,
-        tokenizer,
-        chunk_size,
-        device='cuda',
-        batch_size=32,
-        max_chunks=64
-    ):
-        """
-        Initialize the MTEB wrapper.
-
-        Args:
-            target_chunk_encoder: The EMA chunk encoder model
-            target_encoder: The EMA context encoder model
-            tokenizer: Tokenizer object
-            chunk_size: Size of each chunk
-            device: Device to run on
-            batch_size: Batch size for encoding
-            max_chunks: Maximum number of chunks per text
-        """
-        self.chunk_encoder = target_chunk_encoder.to(device).eval()
-        self.encoder = target_encoder.to(device).eval()
-        self.tokenizer = tokenizer
-        self.chunk_size = chunk_size
-        self.device = device
-        self.batch_size = batch_size
-        self.max_chunks = max_chunks
-
-        # Get EOS token ID for padding
-        self.eos_token_id = tokenizer.token_to_id('<|endoftext|>')
-
-    def encode(
-        self,
-        sentences: list[str],
-        task_name: str,
-        prompt_type: Optional[PromptType] = None,
-        **kwargs,
-    ) -> np.ndarray:
-        """
-        Encodes the given sentences using the JEPA encoder.
-
-        Args:
-            sentences: The sentences to encode.
-            task_name: The name of the task (for logging/debugging).
-            prompt_type: The prompt type to use (not used in JEPA).
-            **kwargs: Additional arguments (not used).
-
-        Returns:
-            The encoded sentences as a numpy array of shape (n_sentences, n_embd).
-        """
-        if not sentences:
-            return np.empty((0, self.encoder.config.n_embd))
-
-        all_embeddings = []
-
-        # Process in batches for efficiency
-        for i in tqdm(range(0, len(sentences), self.batch_size),
-                     desc=f"Encoding for {task_name}", leave=False):
-            batch_sentences = sentences[i:i + self.batch_size]
-
-            # Use the same encoding function as in STS evaluation
-            # This ensures proper attention masking for padding
-            batch_embeddings = encode_batch_for_sts(
-                batch_sentences,
-                self.tokenizer,
-                self.chunk_encoder,
-                self.encoder,
-                self.chunk_size,
-                self.device,
-                max_chunks=self.max_chunks,
-                eos_token_id=self.eos_token_id
-            )
-
-            # Move to CPU and convert to numpy
-            all_embeddings.append(batch_embeddings.cpu().numpy())
-
-        # Concatenate all batches
-        return np.vstack(all_embeddings)
+# JEPAModelForMTEB class is now imported from mteb_validation.py
 
 
 def load_model(checkpoint_path):
