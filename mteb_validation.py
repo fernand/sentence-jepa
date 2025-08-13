@@ -251,11 +251,10 @@ def compute_arxiv_hcp2p_score(chunk_encoder, encoder, target_chunk_encoder, targ
     evaluation = mteb.MTEB(tasks=tasks, verbosity=0)
 
     # Run evaluation
-    results = evaluation.run(model)
+    results = evaluation.run(model, verbosity=0)
 
-    # Remove cache after evaluation if requested
-    if disable_cache and os.path.exists('results'):
-        shutil.rmtree('results')
+    # Remove cache after evaluation
+    shutil.rmtree('results')
 
     chunk_encoder.train()
     encoder.train()
