@@ -9,6 +9,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import CosineAnnealingLR
+import tokenizers
 
 from dataloader import DataLoader
 from model import (
@@ -16,6 +17,7 @@ from model import (
     Encoder, EncoderConfig,
     Predictor, PredictorConfig
 )
+from sts_validation import compute_stsb_spearman
 
 def setup_distributed():
     """Initialize distributed training if available."""
@@ -182,11 +184,18 @@ def main():
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--compile', action='store_true', help='Use torch.compile')
     parser.add_argument('--use_comet', action='store_true', help='Use Comet ML for logging')
+    parser.add_argument('--eval_stsb', action='store_true', help='Evaluate STS-B Spearman correlation during validation')
     args = parser.parse_args()
+
 
     rank, world_size, local_rank, is_distributed = setup_distributed()
     device = torch.device(f'cuda:{local_rank}')
     torch.manual_seed(args.seed + rank)
+
+    # Initialize tokenizer for STS-B evaluation if needed
+    tokenizer = None
+    if args.eval_stsb:
+        tokenizer = tokenizers.Tokenizer.from_file('data/falcon-7b-instruct_tokenizer.json')
 
     seq_len = 1024
     if args.num_steps is None:
@@ -404,10 +413,25 @@ def main():
                 chunk_encoder, encoder, target_chunk_encoder, target_encoder, predictor,
                 val_loader, args.cosine_weight
             )
+
+            # Compute STS-B Spearman correlation if requested
+            stsb_spearman = None
+            if args.eval_stsb and rank == 0:
+                stsb_spearman = compute_stsb_spearman(
+                    chunk_encoder, encoder, target_chunk_encoder, target_encoder,
+                    tokenizer, chunk_size, device, num_samples=250
+                )
+
             if rank == 0:
-                print(f'Step {step} | Validation Loss: {val_loss:.4f}')
-                if experiment:
-                    experiment.log_metric('val_loss', val_loss, step=step)
+                if stsb_spearman is not None:
+                    print(f'Step {step} | Validation Loss: {val_loss:.4f} | STS-B Spearman: {stsb_spearman:.4f}')
+                    if experiment:
+                        experiment.log_metric('val_loss', val_loss, step=step)
+                        experiment.log_metric('stsb_spearman', stsb_spearman, step=step)
+                else:
+                    print(f'Step {step} | Validation Loss: {val_loss:.4f}')
+                    if experiment:
+                        experiment.log_metric('val_loss', val_loss, step=step)
 
         if rank == 0 and step % 5000 == 0 and step > 0:
             checkpoint = {

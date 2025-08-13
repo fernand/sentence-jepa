@@ -1,6 +1,13 @@
 comet-ml
 torch
 datasets
-MTEB
 numpy
 tokenizers
+
+# Eval during train
+MTEB
+scipy
+
+# Eval outside of train
+ir_datasets
+tqdm

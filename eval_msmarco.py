@@ -1,13 +1,13 @@
 import argparse
 import json
-import torch
+import os
+
 import numpy as np
-from transformers import AutoTokenizer
-from tqdm import tqdm
+import tokenizers
+import torch
 import torch.nn.functional as F
 import ir_datasets
-import os
-import pickle
+from tqdm import tqdm
 
 from model import (
     ChunkEncoder, ChunkEncoderConfig,
@@ -66,8 +66,15 @@ def encode_text_to_chunks(text, tokenizer, chunk_encoder, encoder, chunk_size, d
     Encode text into chunk embeddings (not pooled into single vector).
     Returns all chunk CLS embeddings for late interaction.
     """
-    # Tokenize the text
-    tokens = tokenizer(text, truncation=True, max_length=max_tokens, return_tensors='pt')['input_ids'].to(device)
+    # Tokenize the text using tokenizers library
+    encoded = tokenizer.encode(text)
+    # Truncate if needed
+    if len(encoded.ids) > max_tokens:
+        encoded = tokenizer.encode(text)
+        token_ids = encoded.ids[:max_tokens]
+    else:
+        token_ids = encoded.ids
+    tokens = torch.tensor(token_ids, dtype=torch.long).unsqueeze(0).to(device)
 
     # Calculate how many chunks we need
     tokens_per_chunk = chunk_size - 1  # Reserve 1 for CLS token
@@ -86,7 +93,8 @@ def encode_text_to_chunks(text, tokenizer, chunk_encoder, encoder, chunk_size, d
     if original_token_count < total_tokens_needed:
         padding_needed = total_tokens_needed - original_token_count
         # Use EOS token for padding
-        pad_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
+        eos_token_id = tokenizer.token_to_id('<|endoftext|>')
+        pad_token_id = eos_token_id if eos_token_id is not None else 0
         tokens = F.pad(tokens, (0, padding_needed), value=pad_token_id)
         # Extend attention mask with False for padded positions
         attention_mask = F.pad(attention_mask, (0, padding_needed), value=False)
@@ -289,7 +297,8 @@ def main():
     parser = argparse.ArgumentParser(description='Evaluate JEPA model on MS MARCO')
     parser.add_argument('checkpoint', type=str, help='Path to model checkpoint')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
-    parser.add_argument('--tokenizer', type=str, default='tiiuae/falcon-7b')
+    parser.add_argument('--tokenizer', type=str, default='data/falcon-7b-instruct_tokenizer.json',
+                        help='Path to tokenizer file')
     parser.add_argument('--num_queries', type=int, default=100,
                         help='Number of queries to evaluate (default: 100)')
     args = parser.parse_args()
@@ -297,11 +306,8 @@ def main():
     print(f"Loading model from {args.checkpoint}...")
     model_components = load_model(args.checkpoint)
 
-    print(f"Loading tokenizer {args.tokenizer}...")
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
-
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    print(f"Loading tokenizer from {args.tokenizer}...")
+    tokenizer = tokenizers.Tokenizer.from_file(args.tokenizer)
 
     results = evaluate_msmarco_simple(
         model_components,
