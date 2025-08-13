@@ -70,14 +70,14 @@ def encode_batch_for_sts(texts, tokenizer, chunk_encoder, encoder, chunk_size, d
     """
     if not texts:
         return torch.empty(0, encoder.config.n_embd)
-    
+
     all_embeddings = []
-    
+
     # Process each text individually to handle variable lengths
     for text in texts:
         embedding = encode_sentence_for_sts(text, tokenizer, chunk_encoder, encoder, chunk_size, device, max_chunks, eos_token_id)
         all_embeddings.append(embedding)
-    
+
     return torch.cat(all_embeddings, dim=0) if all_embeddings else torch.empty(0, encoder.config.n_embd)
 
 
@@ -86,7 +86,7 @@ def compute_stsb_spearman(chunk_encoder, encoder, target_chunk_encoder, target_e
     Compute Spearman correlation on STS-B validation set.
     Uses the EMA (target) encoders for more stable evaluation.
     Expects a tokenizers.Tokenizer object.
-    
+
     Args:
         num_samples: If provided and less than dataset size, will sample a subset.
                     If None, uses the entire dataset.
@@ -124,10 +124,10 @@ def compute_stsb_spearman(chunk_encoder, encoder, target_chunk_encoder, target_e
     for i in range(0, len(sentences1), batch_size):
         batch_sent1 = sentences1[i:i+batch_size]
         batch_sent2 = sentences2[i:i+batch_size]
-        
+
         batch_emb1 = encode_batch_for_sts(batch_sent1, tokenizer, chunk_enc, enc, chunk_size, device, eos_token_id=eos_token_id)
         batch_emb2 = encode_batch_for_sts(batch_sent2, tokenizer, chunk_enc, enc, chunk_size, device, eos_token_id=eos_token_id)
-        
+
         embeddings1.append(batch_emb1.cpu())
         embeddings2.append(batch_emb2.cpu())
 
@@ -212,11 +212,11 @@ class JEPAModelForMTEB:
         return np.vstack(all_embeddings)
 
 
-def compute_arxiv_hcp2p_vmeasure(chunk_encoder, encoder, target_chunk_encoder, target_encoder, tokenizer, chunk_size, device, batch_size=32):
+def compute_arxiv_hcp2p_score(chunk_encoder, encoder, target_chunk_encoder, target_encoder, tokenizer, chunk_size, device, batch_size=32):
     """
     Compute ArXivHierarchicalClusteringP2P V-measure using MTEB.
     Uses the EMA (target) encoders for more stable evaluation.
-    
+
     Returns:
         v_measure: The V-measure score from the clustering task
     """
@@ -237,22 +237,22 @@ def compute_arxiv_hcp2p_vmeasure(chunk_encoder, encoder, target_chunk_encoder, t
 
     # Get the ArXivHierarchicalClusteringP2P task
     tasks = mteb.get_tasks(tasks=['ArXivHierarchicalClusteringP2P'])
-    
+
     if not tasks:
         print("Warning: ArXivHierarchicalClusteringP2P task not found")
         return 0.0
-    
+
     # Create MTEB evaluation object with minimal verbosity
     evaluation = mteb.MTEB(tasks=tasks, verbosity=0)
-    
+
     # Run evaluation
     results = evaluation.run(model)
-    
+
     chunk_encoder.train()
     encoder.train()
     target_chunk_encoder.train()
     target_encoder.train()
-    
+
     # Extract V-measure score
     if results and len(results) > 0:
         # MTEB returns a list of task results
@@ -262,8 +262,8 @@ def compute_arxiv_hcp2p_vmeasure(chunk_encoder, encoder, target_chunk_encoder, t
             test_scores = task_result.scores['test']
             if isinstance(test_scores, list) and len(test_scores) > 0:
                 # For clustering tasks, scores is a list with one element
-                v_measure = test_scores[0]['v_measure']
+                v_measure = test_scores[0]['main_score']
             else:
-                v_measure = test_scores.get('v_measure', 0.0)
+                v_measure = test_scores.get('main_score', 0.0)
             return v_measure
     return 0.0

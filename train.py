@@ -18,7 +18,7 @@ from model import (
     Encoder, EncoderConfig,
     Predictor, PredictorConfig
 )
-from mteb_validation import compute_stsb_spearman, compute_arxiv_hcp2p_vmeasure
+from mteb_validation import compute_stsb_spearman, compute_arxiv_hcp2p_score
 
 def setup_distributed():
     """Initialize distributed training if available."""
@@ -144,7 +144,7 @@ def main():
     parser.add_argument('--ema_end', type=float, default=1.0, help='Final EMA decay rate')
     parser.add_argument('--mask_ratio', type=float, default=0.50, help='Chunk masking ratio')
     parser.add_argument('--val_loss_every', type=int, default=250, help='Validation frequency')
-    parser.add_argument('--eval_arxiv_p2p', action='store_true', help='Evaluate ArXivHierarchicalClusteringP2P V-measure during validation')
+    parser.add_argument('--eval_arxiv_p2p', action='store_true', help='Evaluate ArXivHierarchicalClusteringP2P during validation')
     parser.add_argument('--project_name', type=str, default='sentence-jepa', help='Comet ML project name')
     parser.add_argument('--num_steps', type=int, default=None, help='Number of training steps')
     parser.add_argument('--dataset_path', type=str, default='data/fineweb-edu_10B', help='Path to dataset')
@@ -379,9 +379,9 @@ def main():
 
         if step % args.val_loss_every == 0 and step > 0:
             # Compute ArXivHierarchicalClusteringP2P V-measure if requested
-            arxiv_vmeasure = None
+            arxiv_score = None
             if args.eval_arxiv_p2p and rank == 0:
-                arxiv_vmeasure = compute_arxiv_hcp2p_vmeasure(
+                arxiv_score = compute_arxiv_hcp2p_score(
                     chunk_encoder, encoder, target_chunk_encoder, target_encoder,
                     tokenizer, chunk_size, device
                 )
@@ -396,10 +396,10 @@ def main():
 
             if rank == 0:
                 metrics_str = f'Step {step}'
-                if arxiv_vmeasure is not None:
-                    metrics_str += f' | ArXiv P2P V-measure: {arxiv_vmeasure:.4f}'
+                if arxiv_score is not None:
+                    metrics_str += f' | ArXiv P2P: {arxiv_score:.4f}'
                     if experiment:
-                        experiment.log_metric('arxiv_hcp2p_vmeasure', arxiv_vmeasure, step=step)
+                        experiment.log_metric('arxiv_hcp2p', arxiv_score, step=step)
                 if stsb_spearman is not None:
                     metrics_str += f' | STS-B Spearman: {stsb_spearman:.4f}'
                     if experiment:
