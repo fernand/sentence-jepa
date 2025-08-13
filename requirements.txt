@@ -1,5 +1,5 @@
 comet-ml
-torch
+# torch
 datasets
 numpy
 tokenizers
@@ -9,5 +9,5 @@ MTEB
 scipy
 
 # Eval outside of train
-ir_datasets
-tqdm
+# ir_datasets
+# tqdm
