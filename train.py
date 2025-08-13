@@ -88,7 +88,7 @@ def compute_jepa_loss(predicted_embeddings, target_embeddings, target_positions,
     valid_mask = torch.arange(max_targets, device=device).unsqueeze(0) < n_masked_per_batch.unsqueeze(1)
     if valid_mask.any():
         loss = cosine_weight * (
-            1 -  F.cosine_similarity(predicted_embeddings[valid_mask], gathered_targets[valid_mask], D, 1e-8).mean()
+            1 -  F.cosine_similarity(predicted_embeddings[valid_mask], gathered_targets[valid_mask], 1, 1e-8).mean()
             ) + (1 - cosine_weight) * F.smooth_l1_loss(
                 predicted_embeddings[valid_mask],
                 gathered_targets[valid_mask],
@@ -261,7 +261,8 @@ def main():
     elif not args.use_comet:
         import uuid
         model_dir = f'models/{uuid.uuid4()}'
-    os.makedirs(model_dir, exist_ok=True)
+    if rank == 0:
+        os.makedirs(model_dir, exist_ok=True)
 
     chunk_encoder = ChunkEncoder(chunk_enc_config).to(device)
     encoder = Encoder(enc_config).to(device)
