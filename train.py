@@ -188,7 +188,6 @@ def main():
     parser.add_argument('--stsb_samples', type=int, default=None, help='Number of STS-B samples to use (None for full dataset)')
     args = parser.parse_args()
 
-
     rank, world_size, local_rank, is_distributed = setup_distributed()
     device = torch.device(f'cuda:{local_rank}')
     torch.manual_seed(args.seed + rank)
@@ -274,6 +273,7 @@ def main():
     if rank == 0:
         os.makedirs(model_dir, exist_ok=True)
 
+    torch.set_float32_matmul_precision('high')
     chunk_encoder = ChunkEncoder(chunk_enc_config).to(device)
     encoder = Encoder(enc_config).to(device)
     target_chunk_encoder = copy.deepcopy(chunk_encoder)  # EMA version of chunk encoder
