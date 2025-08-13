@@ -60,7 +60,25 @@ def encode_sentence_for_sts(text, tokenizer, chunk_encoder, encoder, chunk_size,
     return sentence_embedding
 
 
-def compute_stsb_spearman(chunk_encoder, encoder, target_chunk_encoder, target_encoder, tokenizer, chunk_size, device, num_samples=None):
+def encode_batch_for_sts(texts, tokenizer, chunk_encoder, encoder, chunk_size, device, max_chunks=64, eos_token_id=None):
+    """
+    Encode a batch of sentences into fixed-size representations.
+    Process each text individually to handle variable lengths properly.
+    """
+    if not texts:
+        return torch.empty(0, encoder.config.n_embd)
+    
+    all_embeddings = []
+    
+    # Process each text individually to handle variable lengths
+    for text in texts:
+        embedding = encode_sentence_for_sts(text, tokenizer, chunk_encoder, encoder, chunk_size, device, max_chunks, eos_token_id)
+        all_embeddings.append(embedding)
+    
+    return torch.cat(all_embeddings, dim=0) if all_embeddings else torch.empty(0, encoder.config.n_embd)
+
+
+def compute_stsb_spearman(chunk_encoder, encoder, target_chunk_encoder, target_encoder, tokenizer, chunk_size, device, num_samples=None, batch_size=64):
     """
     Compute Spearman correlation on STS-B validation set.
     Uses the EMA (target) encoders for more stable evaluation.
@@ -69,6 +87,7 @@ def compute_stsb_spearman(chunk_encoder, encoder, target_chunk_encoder, target_e
     Args:
         num_samples: If provided and less than dataset size, will sample a subset.
                     If None, uses the entire dataset.
+        batch_size: Number of sentences to process at once (default: 64)
     """
     chunk_encoder.eval()
     encoder.eval()
@@ -94,15 +113,20 @@ def compute_stsb_spearman(chunk_encoder, encoder, target_chunk_encoder, target_e
     sentences2 = dataset['sentence2']
     scores = np.array(dataset['label'])
 
-    # Encode all sentence pairs
+    # Encode all sentence pairs in batches
     embeddings1 = []
     embeddings2 = []
 
-    for sent1, sent2 in zip(sentences1, sentences2):
-        emb1 = encode_sentence_for_sts(sent1, tokenizer, chunk_enc, enc, chunk_size, device, eos_token_id=eos_token_id)
-        emb2 = encode_sentence_for_sts(sent2, tokenizer, chunk_enc, enc, chunk_size, device, eos_token_id=eos_token_id)
-        embeddings1.append(emb1.cpu())
-        embeddings2.append(emb2.cpu())
+    # Process in batches
+    for i in range(0, len(sentences1), batch_size):
+        batch_sent1 = sentences1[i:i+batch_size]
+        batch_sent2 = sentences2[i:i+batch_size]
+        
+        batch_emb1 = encode_batch_for_sts(batch_sent1, tokenizer, chunk_enc, enc, chunk_size, device, eos_token_id=eos_token_id)
+        batch_emb2 = encode_batch_for_sts(batch_sent2, tokenizer, chunk_enc, enc, chunk_size, device, eos_token_id=eos_token_id)
+        
+        embeddings1.append(batch_emb1.cpu())
+        embeddings2.append(batch_emb2.cpu())
 
     # Stack embeddings
     embeddings1 = torch.cat(embeddings1, dim=0).numpy()
