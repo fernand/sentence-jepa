@@ -169,8 +169,6 @@ def main():
                         help='Path to tokenizer file')
     parser.add_argument('--batch_size', type=int, default=32,
                         help='Batch size for encoding')
-    parser.add_argument('--output_folder', type=str, default='mteb_results',
-                        help='Folder to save MTEB results')
     parser.add_argument('--verbosity', type=int, default=2,
                         help='Verbosity level for MTEB (0-3)')
     args = parser.parse_args()
@@ -210,26 +208,14 @@ def main():
 
     # Run evaluation
     print("\nStarting MTEB evaluation...")
-    results = evaluation.run(
-        model,
-        output_folder=args.output_folder,
-        overwrite_results=False
-    )
-
+    results = evaluation.run(model)
     print("\nEvaluation complete!")
-    print(f"Results saved to {args.output_folder}")
 
-    # Print summary of results
     if results:
         print("\nResults summary:")
-        for task_name, task_results in results.items():
-            print(f"\n{task_name}:")
-            if isinstance(task_results, dict):
-                for metric, value in task_results.items():
-                    if isinstance(value, (int, float)):
-                        print(f"  {metric}: {value:.4f}")
-                    elif isinstance(value, dict) and 'main_score' in value:
-                        print(f"  {metric}: {value['main_score']:.4f}")
+        for task_result in results:
+            print(f"\n{task_result.task_name}:")
+            print(f"\n{task_result.scores['test']}")
 
 
 if __name__ == '__main__':
