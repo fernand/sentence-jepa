@@ -90,21 +90,6 @@ def main():
     print(f"Loading tokenizer from {args.tokenizer}...")
     tokenizer = tokenizers.Tokenizer.from_file(args.tokenizer)
 
-    # Extract model suffix from checkpoint filename
-    # Expected format: *_step_<number>.pt or *_final.pt
-    import os
-    checkpoint_name = os.path.basename(args.checkpoint)
-    if '_step_' in checkpoint_name:
-        # Extract step number from checkpoint_step_12345.pt
-        model_suffix = checkpoint_name.replace('.pt', '').split('_step_')[-1]
-        model_suffix = f"step_{model_suffix}"
-    elif '_final.pt' in checkpoint_name:
-        model_suffix = "final"
-    else:
-        # Fallback to using the full filename without extension
-        model_suffix = checkpoint_name.replace('.pt', '')
-
-    print(f"Initializing JEPA model wrapper for MTEB with suffix: {model_suffix}...")
     model = JEPAModelForMTEB(
         target_chunk_encoder=target_chunk_encoder,
         target_encoder=target_encoder,
@@ -112,7 +97,6 @@ def main():
         chunk_size=chunk_size,
         device=torch.device(args.device),
         batch_size=args.batch_size,
-        model_name_suffix=model_suffix
     )
 
     print(f"\nEvaluating on tasks: {args.tasks}")

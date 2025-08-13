@@ -381,9 +381,7 @@ def main():
             arxiv_score = None
             if args.eval_arxiv_p2p and rank == 0:
                 arxiv_score = compute_arxiv_hcp2p_score(
-                    chunk_encoder, encoder, target_chunk_encoder, target_encoder,
-                    tokenizer, chunk_size, device, model_suffix=f"step_{step}"
-                )
+                    chunk_encoder, encoder, target_chunk_encoder, target_encoder, tokenizer, chunk_size, device)
 
             # Compute STS-B Spearman correlation if requested
             stsb_spearman = None
