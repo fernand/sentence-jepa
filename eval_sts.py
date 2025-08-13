@@ -6,11 +6,15 @@ import tokenizers
 from datasets import load_dataset
 from scipy.stats import spearmanr, pearsonr
 from tqdm import tqdm
-import torch.nn.functional as F
 
 from model import (
     ChunkEncoder, ChunkEncoderConfig,
     Encoder, EncoderConfig,
+)
+from sts_validation import (
+    encode_sentence_for_sts,
+    encode_batch_for_sts,
+    compute_stsb_spearman
 )
 
 def load_model(checkpoint_path):
@@ -60,81 +64,37 @@ def load_model(checkpoint_path):
 
     return chunk_encoder, encoder, target_chunk_encoder, target_encoder, chunk_size
 
-def encode_sentence(text, tokenizer, chunk_encoder, encoder, chunk_size, device, max_chunks=64):
+
+
+def evaluate_sts_benchmark_simple(model_components, tokenizer, device, num_samples=None):
     """
-    Encode a single sentence into a fixed-size representation.
-    Uses attention masking to handle padding properly.
+    Simple evaluation using compute_stsb_spearman from sts_validation.py.
+    
+    Args:
+        model_components: Tuple of (chunk_encoder, encoder, target_chunk_encoder, target_encoder, chunk_size)
+        tokenizer: The tokenizer to use
+        device: The device to run on
+        num_samples: Number of samples to evaluate (None for full dataset)
     """
-    # Tokenize the text using tokenizers library
-    encoded = tokenizer.encode(text)
-    tokens = torch.tensor(encoded.ids, dtype=torch.long).unsqueeze(0).to(device)
-
-    # Calculate how many chunks we need
-    tokens_per_chunk = chunk_size - 1  # Reserve 1 for CLS token
-    original_token_count = tokens.shape[1]
-
-    # Calculate the actual number of chunks needed for this text
-    n_chunks_needed = (original_token_count + tokens_per_chunk - 1) // tokens_per_chunk
-    n_chunks_to_process = min(n_chunks_needed, max_chunks)
-
-    # Truncate if needed
-    if n_chunks_needed > max_chunks:
-        tokens = tokens[:, :max_chunks * tokens_per_chunk]
-        original_token_count = tokens.shape[1]
-
-    # Calculate total tokens needed (must be multiple of tokens_per_chunk)
-    total_tokens_needed = n_chunks_to_process * tokens_per_chunk
-
-    # Create attention mask for original tokens
-    attention_mask = torch.ones(1, original_token_count, dtype=torch.bool, device=device)
-
-    # Pad tokens and mask if needed
-    if original_token_count < total_tokens_needed:
-        padding_needed = total_tokens_needed - original_token_count
-        # Use EOS token for padding (model has seen this during training)
-        eos_token_id = tokenizer.token_to_id('<|endoftext|>')
-        pad_token_id = eos_token_id if eos_token_id is not None else 0
-        tokens = F.pad(tokens, (0, padding_needed), value=pad_token_id)
-        # Extend attention mask with False for padded positions
-        attention_mask = F.pad(attention_mask, (0, padding_needed), value=False)
-
-    with torch.no_grad():
-        # Process through chunk encoder WITH attention mask
-        chunk_embeddings = chunk_encoder(tokens, attention_mask)  # (1, n_chunks, n_embd)
-
-        # All chunks are processed, but padding is masked in attention
-        # Create positions for all chunks
-        all_positions = torch.arange(n_chunks_to_process, device=device).unsqueeze(0)
-
-        # Encode chunks with positional information
-        context_embeddings = encoder(chunk_embeddings, all_positions)  # (1, n_chunks, n_embd)
-
-        # For mean pooling, we could weight by how much real content each chunk has
-        # But for simplicity, we'll use all chunks (padding is already masked in attention)
-        sentence_embedding = context_embeddings.mean(dim=1)  # (1, n_embd)
-
-    return sentence_embedding
-
-def encode_batch(texts, tokenizer, chunk_encoder, encoder, chunk_size, device, max_chunks=64):
-    """
-    Encode a batch of sentences into fixed-size representations.
-    Process each text individually to handle variable lengths properly.
-    """
-    if not texts:
-        return torch.empty(0, encoder.config.n_embd)
-
-    all_embeddings = []
-
-    # Process each text individually to handle variable lengths
-    for text in texts:
-        embedding = encode_sentence(text, tokenizer, chunk_encoder, encoder, chunk_size, device, max_chunks)
-        all_embeddings.append(embedding)
-
-    return torch.cat(all_embeddings, dim=0) if all_embeddings else torch.empty(0, encoder.config.n_embd)
+    chunk_encoder, encoder, target_chunk_encoder, target_encoder, chunk_size = model_components
+    
+    # Move models to device
+    chunk_encoder = chunk_encoder.to(device)
+    encoder = encoder.to(device)
+    target_chunk_encoder = target_chunk_encoder.to(device)
+    target_encoder = target_encoder.to(device)
+    
+    # Use the compute_stsb_spearman function directly
+    spearman_corr = compute_stsb_spearman(
+        chunk_encoder, encoder, target_chunk_encoder, target_encoder,
+        tokenizer, chunk_size, device, num_samples=num_samples
+    )
+    
+    return spearman_corr
 
 def evaluate_sts_benchmark(model_components, tokenizer, device, dataset_name='stsb', batch_size=32):
     """
-    Evaluate the model on STS benchmark tasks.
+    Evaluate the model on STS benchmark tasks with detailed analysis.
 
     Args:
         model_components: Tuple of (chunk_encoder, encoder, target_chunk_encoder, target_encoder, chunk_size)
@@ -215,13 +175,16 @@ def evaluate_sts_benchmark(model_components, tokenizer, device, dataset_name='st
         chunk_enc = chunk_encoder
         enc = encoder
 
+    # Get EOS token ID for padding
+    eos_token_id = tokenizer.token_to_id('<|endoftext|>')
+
     # Process in batches
     for i in tqdm(range(0, len(sentences1), batch_size)):
         batch_sent1 = sentences1[i:i+batch_size]
         batch_sent2 = sentences2[i:i+batch_size]
 
-        batch_emb1 = encode_batch(batch_sent1, tokenizer, chunk_enc, enc, chunk_size, device)
-        batch_emb2 = encode_batch(batch_sent2, tokenizer, chunk_enc, enc, chunk_size, device)
+        batch_emb1 = encode_batch_for_sts(batch_sent1, tokenizer, chunk_enc, enc, chunk_size, device, eos_token_id=eos_token_id)
+        batch_emb2 = encode_batch_for_sts(batch_sent2, tokenizer, chunk_enc, enc, chunk_size, device, eos_token_id=eos_token_id)
 
         embeddings1.append(batch_emb1.cpu())
         embeddings2.append(batch_emb2.cpu())
@@ -270,6 +233,8 @@ def main():
                         help='Device to use for evaluation')
     parser.add_argument('--tokenizer', type=str, default='data/falcon-7b-instruct_tokenizer.json',
                         help='Path to tokenizer file')
+    parser.add_argument('--simple', action='store_true', help='Use simple evaluation (compute_stsb_spearman only)')
+    parser.add_argument('--num_samples', type=int, default=None, help='Number of samples to evaluate (for simple mode)')
     args = parser.parse_args()
 
     print(f"Loading model from {args.checkpoint}...")
@@ -278,30 +243,57 @@ def main():
     print(f"Loading tokenizer from {args.tokenizer}...")
     tokenizer = tokenizers.Tokenizer.from_file(args.tokenizer)
 
-    print(f"Evaluating on {args.dataset}...")
-    results = evaluate_sts_benchmark(
-        model_components,
-        tokenizer,
-        torch.device(args.device),
-        args.dataset
-    )
+    if args.simple:
+        print(f"Using simple evaluation on STS-B...")
+        if args.num_samples:
+            print(f"Evaluating on {args.num_samples} samples")
+        spearman_corr = evaluate_sts_benchmark_simple(
+            model_components,
+            tokenizer,
+            torch.device(args.device),
+            num_samples=args.num_samples
+        )
+        print(f"\nSTS-B Spearman correlation: {spearman_corr:.4f}")
+        
+        # Save simple results
+        import json
+        from pathlib import Path
+        checkpoint_dir = Path(args.checkpoint).parent
+        checkpoint_name = Path(args.checkpoint).name
+        results_file = checkpoint_dir / checkpoint_name.replace('.pt', '_stsb_simple_results.json')
+        with open(results_file, 'w') as f:
+            json.dump({
+                'checkpoint': args.checkpoint,
+                'dataset': 'stsb',
+                'spearman': float(spearman_corr),
+                'num_samples': args.num_samples,
+            }, f, indent=2)
+        print(f"Results saved to {results_file}")
+    else:
+        print(f"Evaluating on {args.dataset}...")
+        results = evaluate_sts_benchmark(
+            model_components,
+            tokenizer,
+            torch.device(args.device),
+            args.dataset
+        )
 
-    print("\nEvaluation complete!")
+        print("\nEvaluation complete!")
 
-    # Optionally save results
-    import json
-    from pathlib import Path
-    checkpoint_dir = Path(args.checkpoint).parent
-    checkpoint_name = Path(args.checkpoint).name
-    results_file = checkpoint_dir / checkpoint_name.replace('.pt', f'_{args.dataset.replace('/', '_')}_results.json')
-    with open(results_file, 'w') as f:
-        json.dump({
-            'checkpoint': args.checkpoint,
-            'dataset': args.dataset,
-            'spearman': float(results['spearman']),
-            'pearson': float(results['pearson']),
-        }, f, indent=2)
-    print(f"Results saved to {results_file}")
+        # Optionally save results
+        import json
+        from pathlib import Path
+        checkpoint_dir = Path(args.checkpoint).parent
+        checkpoint_name = Path(args.checkpoint).name
+        results_file = checkpoint_dir / checkpoint_name.replace('.pt', f'_{args.dataset.replace('/', '_')}_results.json')
+        with open(results_file, 'w') as f:
+            json.dump({
+                'checkpoint': args.checkpoint,
+                'dataset': args.dataset,
+                'spearman': float(results['spearman']),
+                'pearson': float(results['pearson']),
+            }, f, indent=2)
+        print(f"Results saved to {results_file}")
 
 if __name__ == '__main__':
     main()
