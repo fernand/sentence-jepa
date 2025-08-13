@@ -17,9 +17,6 @@ def load_model(checkpoint_path):
     """Load the trained JEPA model from checkpoint."""
     checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
 
-    # Extract args from checkpoint for model configuration
-    args = checkpoint['args']
-
     # Model configuration (matching train.py)
     vocab_size = 65024  # Falcon tokenizer
     chunk_size = 32
