@@ -228,9 +228,11 @@ def compute_arxiv_hcp2p_score(chunk_encoder, encoder, target_chunk_encoder, targ
     target_chunk_encoder.eval()
     target_encoder.eval()
 
+    output_folder = os.environ['HOSTNAME']
+
     # Remove cache before evaluation.
-    if os.path.exists('results'):
-        shutil.rmtree('results')
+    if os.path.exists(output_folder):
+        shutil.rmtree(output_folder)
 
     # Create MTEB wrapper model with unique name
     model = JEPAModelForMTEB(
@@ -253,10 +255,10 @@ def compute_arxiv_hcp2p_score(chunk_encoder, encoder, target_chunk_encoder, targ
     evaluation = mteb.MTEB(tasks=tasks, verbosity=0)
 
     # Run evaluation with explicit batch size
-    results = evaluation.run(model, verbosity=0, batch_size=batch_size, output_folder=os.environ['HOSTNAME'])
+    results = evaluation.run(model, verbosity=0, batch_size=batch_size, output_folder=output_folder)
 
     # Remove cache after evaluation
-    shutil.rmtree('results')
+    shutil.rmtree(output_folder)
 
     chunk_encoder.train()
     encoder.train()
