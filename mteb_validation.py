@@ -1,5 +1,6 @@
 """MTEB validation utilities with caching disabled for training."""
 
+import os
 import shutil
 import socket
 
