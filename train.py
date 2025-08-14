@@ -2,8 +2,6 @@ import argparse
 import copy
 import math
 import os
-import socket
-import subprocess
 import time
 
 import torch
@@ -436,9 +434,6 @@ def main():
     cleanup_distributed()
     if experiment:
         experiment.end()
-
-    if socket.gethostname() != 'mas':
-        subprocess.run(['shutdown', '-h', 'now'])
 
 if __name__ == '__main__':
     main()
