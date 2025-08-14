@@ -2,6 +2,7 @@ import argparse
 import copy
 import math
 import os
+import socket
 import subprocess
 import time
 
@@ -436,7 +437,8 @@ def main():
     if experiment:
         experiment.end()
 
-    subprocess.run(['shutdown', '-h', 'now'])
+    if socket.gethostname() != 'mas':
+        subprocess.run(['shutdown', '-h', 'now'])
 
 if __name__ == '__main__':
     main()
