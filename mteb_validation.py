@@ -1,7 +1,7 @@
 """MTEB validation utilities with caching disabled for training."""
 
 import os
-import shutil
+import socket
 
 import mteb
 import numpy as np
@@ -228,7 +228,7 @@ def compute_arxiv_hcp2p_score(chunk_encoder, encoder, target_chunk_encoder, targ
     target_chunk_encoder.eval()
     target_encoder.eval()
 
-    output_folder = os.environ['HOSTNAME']
+    output_folder = socket.gethostname()
 
     # Remove cache before evaluation.
     if os.path.exists(output_folder):
