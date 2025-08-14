@@ -436,9 +436,7 @@ def main():
     if experiment:
         experiment.end()
 
-    pod_id = os.environ.get('RUNPOD_POD_ID')
-    if pod_id:
-        subprocess.run(['runpodctl', 'remove', 'pod', pod_id])
+    subprocess.run(['shutdown', '-h', 'now'])
 
 if __name__ == '__main__':
     main()
