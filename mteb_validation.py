@@ -253,7 +253,7 @@ def compute_arxiv_hcp2p_score(chunk_encoder, encoder, target_chunk_encoder, targ
     evaluation = mteb.MTEB(tasks=tasks, verbosity=0)
 
     # Run evaluation with explicit batch size
-    results = evaluation.run(model, verbosity=0, batch_size=batch_size)
+    results = evaluation.run(model, verbosity=0, batch_size=batch_size, output_folder=os.environ['HOSTNAME'])
 
     # Remove cache after evaluation
     shutil.rmtree('results')
